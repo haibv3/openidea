@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="12dp"
+    android:background="@color/surface">
+
+    <CheckBox
+        android:id="@+id/done"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentStart="true"
+        android:layout_centerVertical="true" />
+
+    <TextView
+        android:id="@+id/note_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_toEndOf="@id/done"
+        android:layout_toStartOf="@+id/note_time"
+        android:text="@string/note_sample_title"
+        android:textSize="15sp"
+        android:textColor="@color/on_surface"
+        android:ellipsize="end"
+        android:maxLines="1" />
+
+    <TextView
+        android:id="@id/note_time"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_alignParentEnd="true"
+        android:layout_alignBaseline="@id/note_title"
+        android:text="14:05"
+        android:textSize="12sp"
+        android:textColor="@color/on_surface_variant" />
+
+</RelativeLayout>

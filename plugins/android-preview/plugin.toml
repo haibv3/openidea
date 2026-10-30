@@ -1,0 +1,25 @@
+id = "android-preview"
+name = "Android Preview"
+version = "0.1.0"
+description = "Live previews for Android XML layouts and Jetpack Compose @Preview functions, rendered like Android Studio's preview pane."
+authors = ["OpenIDEA contributors"]
+change-notes = """
+0.1.0 — first release: renders Android XML layout files (LinearLayout, FrameLayout,
+RelativeLayout, ConstraintLayout subset, ScrollView, GridLayout, CardView, common
+widgets, resources, tools: overrides and includes) and Jetpack Compose @Preview
+functions (Column/Row/Box trees, modifiers, Material colors).
+"""
+openidea-api = "0.3"
+wasm = "dist/plugin.wasm"
+permissions = ["project-read"]
+
+[[contributes.previews]]
+id = "layout-xml"
+title = "Android Layout Preview"
+extensions = ["xml"]
+path-globs = ["**/res/layout/**"]
+
+[[contributes.previews]]
+id = "compose"
+title = "Compose Preview"
+extensions = ["kt"]

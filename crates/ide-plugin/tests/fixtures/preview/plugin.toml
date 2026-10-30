@@ -1,0 +1,12 @@
+id = "preview-fixture"
+name = "Preview Fixture"
+version = "0.0.1"
+description = "Test fixture: renders `render-preview` requests as HTML."
+openidea-api = "0.3"
+wasm = "dist/plugin.wasm"
+permissions = ["project-read"]
+
+[[contributes.previews]]
+id = "demo"
+title = "Demo Preview"
+extensions = ["demo"]

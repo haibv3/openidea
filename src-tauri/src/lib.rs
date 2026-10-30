@@ -1,7 +1,9 @@
 //! OpenIDEA desktop shell: wires the backend crates into Tauri.
 //!
 //! This crate is glue only. Each `commands/<domain>.rs` is a thin, typed
-//! adapter from IPC to a backend crate; no domain logic lives here.
+//! adapter from IPC to a backend crate; no domain logic lives here. The
+//! exceptions are the things only a desktop shell can do: [`plugin_caps`]
+//! hands the plugin sandbox the IDE's process, network and settings services.
 
 mod commands;
 #[cfg(debug_assertions)]
@@ -9,6 +11,7 @@ mod dev;
 mod events;
 mod logging;
 mod menu;
+mod plugin_caps;
 mod remote_dev;
 
 mod state;

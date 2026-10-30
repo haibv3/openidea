@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod analysis;
+pub mod android;
 pub mod build;
 pub mod bytes;
 pub mod coverage;
@@ -60,6 +61,7 @@ impl<T> Clone for Channel<T> {
 /// Registers the commands of every module with the remote server.
 pub fn register_all(d: &mut crate::rpc::Dispatcher) {
     agent::register(d);
+    android::register(d);
     lsp::register(d);
     notebook::register(d);
     nav::register(d);

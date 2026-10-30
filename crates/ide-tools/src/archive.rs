@@ -121,13 +121,22 @@ fn extract_zip(archive: &Path, dest: &Path, cancel: &CancellationToken) -> IdeRe
         if let Some(parent) = out.parent() {
             fs::create_dir_all(parent)?;
         }
-        #[cfg(unix)]
         if file.is_symlink() {
             let mut target = String::new();
             io::Read::read_to_string(&mut file, &mut target)?;
+            // Checked everywhere: an escaping link is refused even where links cannot be made.
             validate_link(dest, &rel, Path::new(&target))?;
-            let _ = fs::remove_file(&out);
-            std::os::unix::fs::symlink(target, &out)?;
+            #[cfg(unix)]
+            {
+                let _ = fs::remove_file(&out);
+                std::os::unix::fs::symlink(target, &out)?;
+            }
+            #[cfg(not(unix))]
+            {
+                // Windows needs privileges for a link, and a file holding the target text
+                // would be worse than nothing: the entry is dropped.
+                let _ = target;
+            }
             continue;
         }
         let mut w = File::create(&out)?;
@@ -486,17 +495,21 @@ mod tests {
             assert!(fs::symlink_metadata(dest.join("link")).is_err());
         }
         // A link inside the archive (e.g. a framework's Versions/Current) still extracts.
-        let tmp = tempfile::tempdir().unwrap();
-        let archive = tmp.path().join("ok.zip");
-        let mut z = zip::ZipWriter::new(File::create(&archive).unwrap());
-        z.start_file("Versions/A/lib", zip::write::SimpleFileOptions::default()).unwrap();
-        io::Write::write_all(&mut z, b"x").unwrap();
-        z.add_symlink("Versions/Current", "A", zip::write::SimpleFileOptions::default()).unwrap();
-        z.finish().unwrap();
-        let dest = tmp.path().join("out");
-        extract(&archive, ArchiveKind::Zip, &dest, "x", &CancellationToken::new()).unwrap();
-        assert_eq!(fs::read_link(dest.join("Versions/Current")).unwrap(), Path::new("A"));
-        assert_eq!(fs::read(dest.join("Versions/Current/lib")).unwrap(), b"x");
+        // Only Unix materialises links; Windows drops the entry after checking it.
+        #[cfg(unix)]
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let archive = tmp.path().join("ok.zip");
+            let mut z = zip::ZipWriter::new(File::create(&archive).unwrap());
+            z.start_file("Versions/A/lib", zip::write::SimpleFileOptions::default()).unwrap();
+            io::Write::write_all(&mut z, b"x").unwrap();
+            z.add_symlink("Versions/Current", "A", zip::write::SimpleFileOptions::default()).unwrap();
+            z.finish().unwrap();
+            let dest = tmp.path().join("out");
+            extract(&archive, ArchiveKind::Zip, &dest, "x", &CancellationToken::new()).unwrap();
+            assert_eq!(fs::read_link(dest.join("Versions/Current")).unwrap(), Path::new("A"));
+            assert_eq!(fs::read(dest.join("Versions/Current/lib")).unwrap(), b"x");
+        }
     }
 
     #[cfg(unix)]

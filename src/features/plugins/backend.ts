@@ -4,18 +4,35 @@
  * development and tests.
  */
 import { Channel } from "@tauri-apps/api/core";
-import type { ActiveTheme, CatalogPlugin, PluginEvent, PluginInfo, PluginsSnapshot } from "@/bindings";
-import { call, commands, IpcError, isTauri } from "@/platform/ipc";
+import type {
+  ActiveTheme,
+  CatalogPlugin,
+  PluginEvent,
+  PluginInfo,
+  PluginPreviewRendering,
+  PluginsSnapshot,
+  RegistryPlugin,
+  RegistryProgress,
+} from "@/bindings";
+import { call, commands, IpcError, isTauri, nextRequestId } from "@/platform/ipc";
 
 export interface PluginsBackend {
   list(): Promise<PluginsSnapshot>;
   setEnabled(id: string, enabled: boolean): Promise<void>;
   installDir(path: string): Promise<PluginInfo>;
-  /** Plugin packages available locally (no network marketplace). */
+  /** Plugin packages available locally. */
   catalog(): Promise<CatalogPlugin[]>;
+  /** Packages published by a registry index (`plugins.registryUrl`). */
+  registryIndex(url: string): Promise<RegistryPlugin[]>;
+  /** Downloads and installs `id` from `url`, reporting progress. */
+  registryInstall(url: string, id: string, onProgress: (p: RegistryProgress) => void): Promise<PluginInfo>;
   uninstall(id: string): Promise<void>;
   reload(id: string): Promise<PluginInfo>;
   runCommand(pluginId: string, commandId: string, arg: string | null): Promise<string | null>;
+  /** HTML a plugin's preview renders for a file (untrusted; shown sandboxed). */
+  renderPreview(pluginId: string, declId: string, path: string, content: string): Promise<PluginPreviewRendering>;
+  /** Text a plugin's tool window shows (its package `content` file). */
+  toolWindowContent(pluginId: string, windowId: string): Promise<string>;
   setActiveFile(path: string | null): Promise<void>;
   setTheme(pluginId: string | null, themeId: string | null): Promise<ActiveTheme | null>;
   /** The selected theme's resolved frame colour (`#rrggbb[aa]`), which new windows open in. */
@@ -33,11 +50,20 @@ export const tauriPluginsBackend: PluginsBackend = {
   },
   installDir: (path) => call(commands.pluginInstallDir(path)),
   catalog: () => call(commands.pluginCatalog()),
+  registryIndex: (url) => call(commands.pluginRegistryIndex(url)),
+  registryInstall: (url, id, onProgress) => {
+    const channel = new Channel<RegistryProgress>();
+    channel.onmessage = onProgress;
+    return call(commands.pluginRegistryInstall(url, id, nextRequestId(), channel));
+  },
   uninstall: async (id) => {
     await call(commands.pluginUninstall(id));
   },
   reload: (id) => call(commands.pluginReload(id)),
   runCommand: (pluginId, commandId, arg) => call(commands.pluginRunCommand(pluginId, commandId, arg)),
+  renderPreview: (pluginId, declId, path, content) =>
+    call(commands.pluginRenderPreview(pluginId, declId, path, content)),
+  toolWindowContent: (pluginId, windowId) => call(commands.pluginToolWindowContent(pluginId, windowId)),
   setActiveFile: async (path) => {
     await commands.pluginSetActiveFile(path);
   },
@@ -106,7 +132,9 @@ function samplePlugins(): PluginInfo[] {
     languages: [],
     themes: [],
     commands: [],
+    toolWindows: [],
     permissions: [],
+    previews: [],
   };
   return [
     {
@@ -122,6 +150,16 @@ function samplePlugins(): PluginInfo[] {
       commands: [
         { id: "insert-date", title: "Hello: Insert Date", category: "Hello" },
         { id: "word-count", title: "Hello: Word Count of Active File", category: "Hello" },
+      ],
+      toolWindows: [
+        {
+          id: "about",
+          title: "Hello Notes",
+          anchor: "bottom",
+          icon: null,
+          content: "docs/about.md",
+          command: null,
+        },
       ],
     },
     {
@@ -214,6 +252,12 @@ export function createMemoryPluginsBackend(
       return { ...info };
     },
     catalog: async () => catalog.map((c) => ({ ...c })),
+    registryIndex: async () => {
+      throw new IpcError({ kind: "unavailable", message: "browsing a registry requires the desktop app" });
+    },
+    registryInstall: async () => {
+      throw new IpcError({ kind: "unavailable", message: "installing from a registry requires the desktop app" });
+    },
     uninstall: async (id) => {
       find(id);
       plugins = plugins.filter((p) => p.id !== id);
@@ -236,6 +280,19 @@ export function createMemoryPluginsBackend(
         return null;
       }
       throw new IpcError({ kind: "internal", message: `unknown command: ${commandId}` });
+    },
+    renderPreview: async (pluginId) => ({
+      pluginId,
+      html: '<body style="font-family:sans-serif;padding:16px"><p>(simulated preview)</p></body>',
+      background: null,
+    }),
+    toolWindowContent: async (pluginId, windowId) => {
+      const p = find(pluginId);
+      const w = p.toolWindows.find((x) => x.id === windowId);
+      if (!w?.content) {
+        throw new IpcError({ kind: "unavailable", message: "reading a plugin package requires the desktop app" });
+      }
+      return `${p.name} — ${w.content}\n(simulated package file; run the desktop app for the real text)`;
     },
     setActiveFile: async (path) => {
       activeFile = path;

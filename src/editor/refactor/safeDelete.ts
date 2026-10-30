@@ -365,13 +365,26 @@ export function textOccurrences(
   const out: { from: number; to: number }[] = [];
   for (let m = re.exec(text); m; m = re.exec(text)) {
     const from = m.index;
-    if (/[\p{L}\p{N}_$]$/u.test(text.slice(Math.max(0, from - 2), from))) continue;
+    if (precededByName(text, from)) continue;
     if (ids.has(from) || (from >= exclude.from && from < exclude.to)) continue;
     out.push({ from, to: from + name.length });
   }
   return out;
 }
 
+/**
+ * Whether the code point before `at` is an identifier character, so a match
+ * there is the tail of a longer name. A surrogate pair is one code point: its
+ * low unit sits at `at - 1` and its high one at `at - 2`.
+ */
+function precededByName(text: string, at: number): boolean {
+  if (at <= 0) return false;
+  const last = text.charCodeAt(at - 1);
+  const start = last >= 0xdc00 && last <= 0xdfff ? at - 2 : at - 1;
+  return NAME_CHAR.test(text.slice(Math.max(0, start), at));
+}
+
+const NAME_CHAR = /^[\p{L}\p{N}_$]$/u;
 async function commentAndStringOccurrences(
   ctx: EditorDocContext,
   doc: Text,

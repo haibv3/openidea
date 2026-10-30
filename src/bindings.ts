@@ -638,6 +638,56 @@ export const commands = {
 	sdkPythonPackages: (python: string, request: RequestId) => typedError<PythonPackage[], IdeError>(__TAURI_INVOKE("sdk_python_packages", { python, request })),
 	/**  Installs (`uninstall = false`) or removes a package; output streams through `on_output`. */
 	sdkPythonPip: (python: string, requirement: string, uninstall: boolean, upgrade: boolean, request: RequestId, onOutput: Channel<string>) => typedError<null, IdeError>(__TAURI_INVOKE("sdk_python_pip", { python, requirement, uninstall, upgrade, request, onOutput })),
+	/**  The Android SDK the window's project uses, when one is installed. */
+	androidSdk: () => typedError<{
+	root: IpcPath,
+	/**  `platform-tools/adb`; absent when platform-tools is not installed. */
+	adb: IpcPath | null,
+	/**  `emulator/emulator`; absent when the emulator package is not installed. */
+	emulator: IpcPath | null,
+	/**  `cmdline-tools/latest/bin/sdkmanager`. */
+	sdkmanager: IpcPath | null,
+	/**  `cmdline-tools/latest/bin/avdmanager`. */
+	avdmanager: IpcPath | null,
+	platforms: AndroidPlatform[],
+	/**  Installed `build-tools` versions, ascending. */
+	buildTools: string[],
+	/**  The open project is an Android one (manifest or Android Gradle plugin). */
+	androidProject: boolean,
+	/**  `com.android.application` modules of the open project. */
+	modules: AndroidModule[],
+	/**
+	 *  Where the SDK was found: `ANDROID_HOME`, `ANDROID_SDK_ROOT`,
+	 *  `local.properties` or `default`.
+	 */
+	source: string,
+} | null, IdeError>(__TAURI_INVOKE("android_sdk")),
+	/**  Connected devices and emulators of the SDK at `adb`. */
+	androidDevices: (adb: string, request: RequestId) => typedError<Device[], IdeError>(__TAURI_INVOKE("android_devices", { adb, request })),
+	/**  The AVDs of the emulator installation at `emulator`. */
+	androidAvds: (emulator: string, request: RequestId) => typedError<string[], IdeError>(__TAURI_INVOKE("android_avds", { emulator, request })),
+	/**  Launches an emulator in the background; it shows up as a device once booted. */
+	androidEmulatorStart: (emulator: string, avd: string, coldBoot: boolean) => typedError<string, IdeError>(__TAURI_INVOKE("android_emulator_start", { emulator, avd, coldBoot })),
+	/**  Asks the emulator behind `serial` to shut down. */
+	androidEmulatorStop: (adb: string, serial: string, request: RequestId) => typedError<null, IdeError>(__TAURI_INVOKE("android_emulator_stop", { adb, serial, request })),
+	/**  `adb install [-r] <apk>`; output lines stream through `on_output`. */
+	androidInstall: (adb: string, serial: string | null, apk: string, reinstall: boolean, request: RequestId, onOutput: Channel<string>) => typedError<null, IdeError>(__TAURI_INVOKE("android_install", { adb, serial, apk, reinstall, request, onOutput })),
+	/**  Starts `package/activity` (its launcher activity when `activity` is empty). */
+	androidLaunch: (adb: string, serial: string | null, packageName: string, activity: string | null, request: RequestId) => typedError<string, IdeError>(__TAURI_INVOKE("android_launch", { adb, serial, packageName, activity, request })),
+	/**  Stops the app on the device and starts it again. */
+	androidRestart: (adb: string, serial: string | null, packageName: string, activity: string | null, request: RequestId) => typedError<string, IdeError>(__TAURI_INVOKE("android_restart", { adb, serial, packageName, activity, request })),
+	/**  Forwards the running app's JDWP socket to a local port the debugger attaches to. */
+	androidJdwpForward: (adb: string, serial: string, packageName: string, request: RequestId) => typedError<number, IdeError>(__TAURI_INVOKE("android_jdwp_forward", { adb, serial, packageName, request })),
+	/**  Lists one directory of the device's own file system. */
+	androidLs: (adb: string, serial: string, path: string, request: RequestId) => typedError<DeviceEntry[], IdeError>(__TAURI_INVOKE("android_ls", { adb, serial, path, request })),
+	/**  Downloads one file of the device into `local`. */
+	androidPull: (adb: string, serial: string, remote: string, local: string, request: RequestId) => typedError<number, IdeError>(__TAURI_INVOKE("android_pull", { adb, serial, remote, local, request })),
+	/**  Uploads the local file to the device at `remote`. */
+	androidPush: (adb: string, serial: string, local: string, remote: string, request: RequestId) => typedError<null, IdeError>(__TAURI_INVOKE("android_push", { adb, serial, local, remote, request })),
+	/**  Streams logcat entries until the request is cancelled. */
+	androidLogcat: (adb: string, serial: string | null, filter: LogFilter, request: RequestId, onLog: Channel<LogEntry>) => typedError<null, IdeError>(__TAURI_INVOKE("android_logcat", { adb, serial, filter, request, onLog })),
+	/**  Builds the module, installs the APK on the device and starts the app. */
+	androidDeploy: (adb: string, serial: string, module: string, variant: string, request: RequestId, onOutput: Channel<string>) => typedError<DeployResult, IdeError>(__TAURI_INVOKE("android_deploy", { adb, serial, module, variant, request, onOutput })),
 	/**
 	 *  Opens `path` in a new window (`new_window`) or tells the caller to open it
 	 *  itself (`current`). A project already open in some window is focused instead.
@@ -781,7 +831,7 @@ export const commands = {
 	/**
 	 *  Plugin packages available locally for installation: `<resources>/plugins`
 	 *  when bundled, plus the repository's sample `plugins/` in debug builds.
-	 *  There is no network marketplace.
+	 *  Published packages come from [`plugin_registry_index`].
 	 */
 	pluginCatalog: () => typedError<CatalogPlugin[], IdeError>(__TAURI_INVOKE("plugin_catalog")),
 	pluginUninstall: (id: string) => typedError<null, IdeError>(__TAURI_INVOKE("plugin_uninstall", { id })),
@@ -789,6 +839,13 @@ export const commands = {
 	pluginReload: (id: string) => typedError<PluginInfo, IdeError>(__TAURI_INVOKE("plugin_reload", { id })),
 	/**  Runs a plugin command in the context of this window's project. */
 	pluginRunCommand: (pluginId: string, commandId: string, arg: string | null) => typedError<string | null, IdeError>(__TAURI_INVOKE("plugin_run_command", { pluginId, commandId, arg })),
+	/**
+	 *  Renders a file preview with a plugin's `render-preview` export, in the
+	 *  context of this window's project. The `content` is the editor's current text.
+	 */
+	pluginRenderPreview: (pluginId: string, declId: string, path: string, content: string) => typedError<PluginPreviewRendering, IdeError>(__TAURI_INVOKE("plugin_render_preview", { pluginId, declId, path, content })),
+	/**  The text a plugin's tool window shows: its package `content` file. */
+	pluginToolWindowContent: (pluginId: string, windowId: string) => typedError<string, IdeError>(__TAURI_INVOKE("plugin_tool_window_content", { pluginId, windowId })),
 	/**  The UI reports the focused editor's file (`active-file` for plugins). */
 	pluginSetActiveFile: (path: string | null) => __TAURI_INVOKE<void>("plugin_set_active_file", { path }),
 	/**  Selects a plugin theme; both `None` restores the built-in theme. */
@@ -801,6 +858,13 @@ export const commands = {
 	 *  which new windows open in before their page loads.
 	 */
 	pluginSetThemeFrame: (color: string | null) => typedError<null, IdeError>(__TAURI_INVOKE("plugin_set_theme_frame", { color })),
+	/**  Packages published by the registry at `url` (`plugins.registryUrl`). */
+	pluginRegistryIndex: (url: string) => typedError<RegistryPlugin[], IdeError>(__TAURI_INVOKE("plugin_registry_index", { url })),
+	/**
+	 *  Downloads `plugin_id` from the registry at `url`, verifies its checksum and
+	 *  installs it; progress streams through `on_progress`, cancel through `request`.
+	 */
+	pluginRegistryInstall: (url: string, pluginId: string, request: RequestId, onProgress: Channel<RegistryProgress>) => typedError<PluginInfo, IdeError>(__TAURI_INVOKE("plugin_registry_install", { url, pluginId, request, onProgress })),
 	/**
 	 *  Snapshot of process memory and subsystem sizes, summed over all projects.
 	 *  Async: the process walk runs on the blocking pool, not the main thread.
@@ -1299,6 +1363,51 @@ export type AgentUsage = {
 	used: number,
 	/**  Size of the context window. */
 	size: number,
+};
+
+/**  One `com.android.application` module of the project. */
+export type AndroidModule = {
+	/**  Project-relative directory (`app`); empty for a module at the project root. */
+	dir: string,
+	/**  `applicationId` of the build script, else the manifest's `package`. */
+	applicationId: string | null,
+	/**  Build types declared in `buildTypes`; `debug` first. */
+	variants: string[],
+	path: IpcPath,
+};
+
+/**  One `platforms/android-<api>` directory the SDK has installed. */
+export type AndroidPlatform = {
+	/**  API level, e.g. `35`. */
+	api: number,
+	/**  Directory name, e.g. `android-35`. */
+	name: string,
+	path: IpcPath,
+};
+
+/**  An installed Android SDK: where it is, which tools it has and what it contains. */
+export type AndroidSdk = {
+	root: IpcPath,
+	/**  `platform-tools/adb`; absent when platform-tools is not installed. */
+	adb: IpcPath | null,
+	/**  `emulator/emulator`; absent when the emulator package is not installed. */
+	emulator: IpcPath | null,
+	/**  `cmdline-tools/latest/bin/sdkmanager`. */
+	sdkmanager: IpcPath | null,
+	/**  `cmdline-tools/latest/bin/avdmanager`. */
+	avdmanager: IpcPath | null,
+	platforms: AndroidPlatform[],
+	/**  Installed `build-tools` versions, ascending. */
+	buildTools: string[],
+	/**  The open project is an Android one (manifest or Android Gradle plugin). */
+	androidProject: boolean,
+	/**  `com.android.application` modules of the open project. */
+	modules: AndroidModule[],
+	/**
+	 *  Where the SDK was found: `ANDROID_HOME`, `ANDROID_SDK_ROOT`,
+	 *  `local.properties` or `default`.
+	 */
+	source: string,
 };
 
 export type AppInfo = {
@@ -2321,6 +2430,16 @@ export type DeletedBranch = {
 	unmerged: boolean,
 };
 
+/**  What `deploy` built and installed. */
+export type DeployResult = {
+	/**  Project-relative directory of the built module. */
+	module: string,
+	variant: string,
+	apk: IpcPath,
+	/**  `applicationId` started on the device, when the module declares one. */
+	applicationId: string | null,
+};
+
 /**  Where a local file is deployed. */
 export type DeployedPath = {
 	server: string,
@@ -2365,6 +2484,38 @@ export type DeploymentSettings = {
 	/**  File names never uploaded or downloaded (`*` and `?` wildcards; `;`-separated in the UI). */
 	exclude?: string[],
 };
+
+/**  One device or emulator as `adb devices -l` reports it. */
+export type Device = {
+	/**  `emulator-5554`, `R58M12345`, or `host:port`. */
+	serial: string,
+	/**  `device` (ready) | `offline` | `unauthorized` | `bootloader` | `recovery` | … */
+	state: string,
+	model: string | null,
+	product: string | null,
+	device: string | null,
+	transportId: string | null,
+	usb: string | null,
+};
+
+/**  One entry of a device directory. */
+export type DeviceEntry = {
+	name: string,
+	kind: DeviceKind,
+	/**  Bytes; a directory reports its block size, as `ls` does. */
+	size: number,
+	/**  `2024-05-01 12:00`, as the device prints it. */
+	modified: string | null,
+	/**  Owner and group, `system:system`. */
+	owner: string | null,
+	/**  The `ls` permission string, `drwxrwx---`. */
+	permissions: string,
+};
+
+/**  What kind of entry `ls -l` reported. */
+export type DeviceKind = "dir" | "file" | 
+/**  Symlink or special file: shown, never entered. */
+"link";
 
 export type Diagnostic = {
 	range: Range,
@@ -3948,6 +4099,28 @@ export type Location = {
 	uri?: string | null,
 };
 
+/**  One `logcat -v threadtime` line. */
+export type LogEntry = {
+	/**  The line as adb printed it. */
+	raw: string,
+	/**  `MM-DD HH:MM:SS.mmm`. */
+	timestamp: string | null,
+	pid: number | null,
+	tid: number | null,
+	/**  `V` | `D` | `I` | `W` | `E` | `F` | `A` | `S`. */
+	level: string | null,
+	tag: string | null,
+	message: string,
+};
+
+/**  What to show from logcat. */
+export type LogFilter = {
+	/**  Only the process of this package (`pidof` at start; restart logcat after the app restarts). */
+	package: string | null,
+	/**  Lowest level kept: `V` | `D` | `I` | `W` | `E`. */
+	level: string | null,
+};
+
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
 export type LogLocation = {
@@ -4366,7 +4539,17 @@ export type Permission =
 /**  `active-file`. */
 "editor-read" | 
 /**  `insert-text`, `replace-selection`. */
-"editor-write";
+"editor-write" | 
+/**  `write-file`, `create-dir`, `delete-file` inside the project root. */
+"project-write" | 
+/**  `run-process`. */
+"process" | 
+/**  `http-fetch`. */
+"net" | 
+/**  `settings-get`. */
+"settings-read" | 
+/**  `settings-set`. */
+"settings-write";
 
 /**  Backend → UI notifications (Tauri event `ide://plugin`). */
 export type PluginEvent = 
@@ -4393,12 +4576,46 @@ export type PluginInfo = {
 	commands: CommandDecl[],
 	languages: PluginLanguage[],
 	themes: PluginTheme[],
+	/**  Tool windows the plugin docks while it is enabled. */
+	toolWindows: PluginToolWindow[],
+	/**  File previews the plugin renders while it is enabled. */
+	previews: PluginPreviewDecl[],
 };
 
 export type PluginLanguage = {
 	id: string,
 	name: string,
 	extensions: string[],
+};
+
+/**
+ *  A file preview a plugin renders through its `render-preview` export (see
+ *  `contributes.previews` in `plugin.toml`). Files matching the extensions and
+ *  path globs get a preview pane; the plugin renders their content as HTML.
+ */
+export type PluginPreviewDecl = {
+	id: string,
+	title: string,
+	extensions: string[],
+	pathGlobs: string[],
+};
+
+/**
+ *  What a plugin's `render-preview` produced (the UI knows the plugin and the
+ *  preview title from the plugin list).
+ */
+export type PluginPreviewRendering = {
+	pluginId: string,
+	html: string,
+	background: string | null,
+};
+
+export type PluginSettings = {
+	/**
+	 *  Index URL of an online plugin repository (`https://…/index.json`);
+	 *  empty = Settings › Plugins offers local packages only.
+	 */
+	registryUrl?: string,
 };
 
 export type PluginSource = 
@@ -4419,6 +4636,23 @@ export type PluginTheme = {
 	id: string,
 	name: string,
 	kind: ThemeKind,
+};
+
+/**
+ *  A tool window a plugin docks in the workbench. Exactly one of `content` and
+ *  `command` is set: the window shows the package file, or the text the plugin's
+ *  command returns when the window asks for it.
+ */
+export type PluginToolWindow = {
+	id: string,
+	title: string,
+	anchor: ToolWindowAnchor,
+	/**  Icon name from the IDE's icon set; the UI falls back to the plugin icon. */
+	icon: string | null,
+	/**  Text file relative to the package directory. */
+	content: string | null,
+	/**  Command of this plugin whose result the window shows. */
+	command: string | null,
 };
 
 export type PluginsSnapshot = {
@@ -4825,6 +5059,35 @@ export type RegistryDistribution =
 "npx" | 
 /**  A Python package run by uv. */
 "uvx";
+
+/**
+ *  One published package. `id`, `name`, `version` and `url` are required; the
+ *  rest fall back to their default when the registry omits them.
+ */
+export type RegistryPlugin = {
+	id: string,
+	name: string,
+	version: string,
+	description?: string,
+	authors?: string[],
+	homepage?: string | null,
+	changeNotes?: string | null,
+	/**  `openidea-api` the package targets; the UI warns before a mismatch is downloaded. */
+	openideaApi?: string | null,
+	/**  Download URL of the package ZIP. */
+	url: string,
+	/**  Lowercase hex SHA-256 of the ZIP; entries without one install unverified. */
+	sha256?: string | null,
+	/**  Declared size in bytes, for the UI. */
+	size?: number | null,
+};
+
+/**  `Downloading` / `Installing` progress of [`crate::PluginHost`] package installs. */
+export type RegistryProgress = 
+/**  Bytes received so far; `total` when the server sends a length. */
+{ type: "downloading"; downloaded: number | null; total: number | null } | 
+/**  Download done; the package is being unpacked and loaded. */
+{ type: "installing" };
 
 export type Remote = {
 	name: string,
@@ -5336,6 +5599,8 @@ export type Settings_Deserialize = {
 	deployment?: DeploymentSettings,
 	/**  Build, Execution, Deployment › Run Targets. */
 	runTargets?: RunTarget[],
+	/**  Settings › Plugins: the online package repository to browse. */
+	plugins?: PluginSettings,
 };
 
 export type Settings_Serialize = {
@@ -5391,6 +5656,8 @@ export type Settings_Serialize = {
 	deployment: DeploymentSettings,
 	/**  Build, Execution, Deployment › Run Targets. */
 	runTargets: RunTarget[],
+	/**  Settings › Plugins: the online package repository to browse. */
+	plugins: PluginSettings,
 };
 
 export type Severity = "error" | "warning" | "info" | "hint";
@@ -5913,6 +6180,9 @@ export type ToolStatus =
 "onPath" | 
 /**  The executable chosen in settings. */
 "custom" | "missing";
+
+/**  Where a plugin's tool window docks in the workbench. */
+export type ToolWindowAnchor = "left" | "right" | "bottom";
 
 export type TransferError = {
 	path: string,

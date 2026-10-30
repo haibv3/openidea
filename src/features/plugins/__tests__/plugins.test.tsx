@@ -3,10 +3,10 @@ import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { EditorSelection, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import type { PluginInfo } from "@/bindings";
+import type { PluginInfo, PluginToolWindow, RegistryPlugin } from "@/bindings";
 import { _setActiveEditor } from "@/editor/api";
 import { executeAction, getAction } from "@/platform/actions";
-import { provideNotificationService, type NotificationService } from "@/workbench/contributions";
+import { provideNotificationService, useContributions, type NotificationService } from "@/workbench/contributions";
 import { applyThemeAttributes, useThemeOverride } from "@/workbench/theme";
 import { createMemoryPluginsBackend, sampleCatalog, setPluginsBackend, type PluginsBackend } from "../backend";
 import {
@@ -17,11 +17,14 @@ import {
   pluginActionId,
   pluginActions,
   startPluginBridge,
+  syncPluginToolWindows,
 } from "../bridge";
-import { catalogState, filterCatalog, filterPlugins, NO_REPOSITORY, PluginsPage } from "../PluginsPage";
+import { PluginWindowView } from "../PluginWindowView";
+import { catalogState, filterCatalog, filterPlugins, filterRegistry, PluginsPage } from "../PluginsPage";
 import {
   compareVersions,
   refreshPlugins,
+  registryState,
   runPluginCommand,
   selectPluginTheme,
   setAllInstalledEnabled,
@@ -52,6 +55,8 @@ function plugin(partial: Partial<PluginInfo> & Pick<PluginInfo, "id">): PluginIn
     commands: [],
     languages: [],
     themes: [],
+    toolWindows: [],
+    previews: [],
     ...partial,
   };
 }
@@ -288,7 +293,7 @@ describe("PluginsPage", () => {
     render(<PluginsPage />);
     await user.click(screen.getByRole("tab", { name: /Available/ }));
     const list = await screen.findByRole("list", { name: "Available plugins" });
-    expect(within(list).getByText(new RegExp(NO_REPOSITORY))).toBeInTheDocument();
+    expect(within(list).getByRole("textbox", { name: "Plugin repository URL" })).toBeInTheDocument();
     await waitFor(() => expect(within(list).getByText("Toy Language")).toBeInTheDocument());
     await user.click(within(list).getByText("Toy Language"));
     expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Toy Language");
@@ -315,6 +320,28 @@ describe("catalog helpers", () => {
     expect(filterCatalog(sampleCatalog(), "harbor").map((c) => c.id)).toEqual(["theme-harbor-night"]);
   });
 
+  it("filters and states registry packages", () => {
+    const published: RegistryPlugin = {
+      id: "hello",
+      name: "Hello",
+      version: "0.2.0",
+      description: "Inserts today's date",
+      authors: ["You"],
+      homepage: null,
+      changeNotes: null,
+      openideaApi: "0.1",
+      url: "https://example.com/hello-0.2.0.zip",
+      sha256: "ab".repeat(32),
+      size: 2048,
+    };
+    expect(filterRegistry([published], "date").map((p) => p.id)).toEqual(["hello"]);
+    expect(filterRegistry([published], "other")).toEqual([]);
+    expect(registryState(published, [])).toBe("install");
+    expect(registryState(published, [plugin({ id: "hello", version: "0.1.0" })])).toBe("update");
+    expect(registryState(published, [plugin({ id: "hello", version: "0.2.0" })])).toBe("installed");
+    expect(registryState(published, [plugin({ id: "hello", source: "dev" })])).toBe("installed");
+  });
+
   it("disables and re-enables all downloaded plugins, leaving dev plugins alone", async () => {
     setPluginsBackend(
       createMemoryPluginsBackend([plugin({ id: "a" }), plugin({ id: "b" }), plugin({ id: "d", source: "dev" })]),
@@ -325,5 +352,72 @@ describe("catalog helpers", () => {
     expect(enabled()).toEqual({ a: false, b: false, d: true });
     expect(await setAllInstalledEnabled(true)).toBe(2);
     expect(enabled()).toEqual({ a: true, b: true, d: true });
+  });
+});
+
+describe("plugin tool windows", () => {
+  const contributionIds = () => [...useContributions.getState().toolWindows.keys()];
+  const notesWindow = (partial: Partial<PluginToolWindow> = {}): PluginToolWindow => ({
+    id: "about",
+    title: "Hello Notes",
+    anchor: "bottom",
+    icon: null,
+    content: "docs/about.md",
+    command: null,
+    ...partial,
+  });
+  const dock = (window: PluginToolWindow) => {
+    const stop = syncPluginToolWindows();
+    usePlugins.setState({ plugins: [plugin({ id: "hello", name: "Hello", toolWindows: [window] })] });
+    return stop;
+  };
+
+  it("docks a window per contribution and un-docks it with the plugin", () => {
+    const stop = dock(notesWindow());
+    expect(contributionIds()).toContain("plugin.hello.about");
+    expect(useContributions.getState().toolWindows.get("plugin.hello.about")).toMatchObject({
+      title: "Hello Notes",
+      anchor: "bottom",
+    });
+    usePlugins.setState({ plugins: [plugin({ id: "hello", name: "Hello", status: "disabled" })] });
+    expect(contributionIds()).not.toContain("plugin.hello.about");
+    stop();
+    usePlugins.setState({ plugins: [plugin({ id: "hello", name: "Hello", toolWindows: [notesWindow()] })] });
+    expect(contributionIds()).not.toContain("plugin.hello.about");
+  });
+
+  it("re-docks a window whose title changed", () => {
+    const stop = dock(notesWindow());
+    usePlugins.setState({
+      plugins: [plugin({ id: "hello", name: "Hello", toolWindows: [notesWindow({ title: "Notes" })] })],
+    });
+    expect(useContributions.getState().toolWindows.get("plugin.hello.about")?.title).toBe("Notes");
+    stop();
+  });
+
+  it("shows the package file a content window points at", async () => {
+    const stop = dock(notesWindow());
+    const Window = useContributions.getState().toolWindows.get("plugin.hello.about")!.component;
+    render(<Window id="plugin.hello.about" />);
+    expect(await screen.findByText("Hello — docs/about.md")).toBeInTheDocument();
+    await userEvent.click(screen.getByLabelText("Reload File"));
+    expect(await screen.findByText("Hello — docs/about.md")).toBeInTheDocument();
+    expect(screen.getByText("From plugin Hello")).toBeInTheDocument();
+    stop();
+  });
+
+  it("runs the command of a command window and shows its text", async () => {
+    const stop = dock(notesWindow({ id: "today", content: null, command: "insert-date" }));
+    const Window = useContributions.getState().toolWindows.get("plugin.hello.today")!.component;
+    render(<Window id="plugin.hello.today" />);
+    expect(await screen.findByText(/^\d{4}-\d{2}-\d{2}$/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Run Again" }));
+    expect(await screen.findByText(/^\d{4}-\d{2}-\d{2}$/)).toBeInTheDocument();
+    stop();
+  });
+
+  it("says so when the contributing plugin is gone", () => {
+    render(<PluginWindowView id="plugin.gone.about" />);
+    expect(screen.getByText("No plugin window")).toBeInTheDocument();
   });
 });

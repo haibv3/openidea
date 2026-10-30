@@ -25,7 +25,9 @@ OpenIDEA brings the IntelliJ IDEA way of working — its keymap, its tool window
 its search-everything habits — to a native app with a Rust core.
 
 Editor, code insight, debugger, Git, terminal, database and HTTP clients,
-for 60+ languages. Builds for macOS, Windows and Linux.
+Android development (run, logcat, emulators, device files, debugging), and
+sandboxed WebAssembly plugins — for 60+ languages. Builds for macOS, Windows
+and Linux.
 
 ## Benchmark
 

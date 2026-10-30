@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@color/surface"
+    android:padding="16dp">
+
+    <androidx.constraintlayout.widget.Guideline
+        android:id="@+id/avatar_end"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        app:layout_constraintGuide_begin="72dp" />
+
+    <ImageView
+        android:id="@+id/avatar"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:src="@drawable/avatar_placeholder"
+        android:background="@color/primary_container"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <TextView
+        android:id="@+id/profile_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/profile_name"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:textColor="@color/on_surface"
+        app:layout_constraintStart_toEndOf="@id/avatar_end"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="@id/avatar" />
+
+    <TextView
+        android:id="@+id/profile_status"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/profile_status"
+        android:textSize="13sp"
+        android:textColor="@color/on_surface_variant"
+        app:layout_constraintStart_toStartOf="@id/profile_name"
+        app:layout_constraintTop_toBottomOf="@id/profile_name"
+        app:layout_constraintWidth_percent="0.7" />
+
+    <Button
+        android:id="@+id/follow"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:text="@string/follow_label"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/profile_status" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

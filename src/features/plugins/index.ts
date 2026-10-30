@@ -9,10 +9,14 @@
  * a string arg is forwarded to the plugin).
  */
 import { lazyComponent } from "@/ui";
-import { executeAction, registerActions } from "@/platform/actions";
+import { executeAction, registerActions, type Action } from "@/platform/actions";
+import { getContext } from "@/platform/context";
 import { useProject } from "@/platform/project";
-import { registerSettingsPage } from "@/workbench/contributions";
+import { registerSettingsPage, registerTextEditorWrapper } from "@/workbench/contributions";
 import { startPluginBridge, trackPluginTheme } from "./bridge";
+import { registerPluginPreviewLiveSource } from "./preview/live";
+import { findPreviewProvider } from "./preview/match";
+import { setPluginPreviewMode, type PluginPreviewMode } from "./preview/modes";
 import { installFromDisk, refreshPlugins, reloadPlugin, SETTINGS_PAGE_ID, usePlugins } from "./store";
 
 function registerPluginsPage(): () => void {
@@ -32,6 +36,30 @@ export function activateSettingsPages(): () => void {
   void refreshPlugins();
   return () => disposers.reverse().forEach((d) => d());
 }
+
+/** Layout actions for files a plugin preview covers (mirrors the Markdown modes). */
+function previewModeActions(): Action[] {
+  const mode = (id: string, title: string, m: PluginPreviewMode, icon: string): Action => ({
+    id,
+    title,
+    category: "Preview",
+    icon,
+    keywords: ["plugin", "preview", "layout"],
+    when: "textEditorActive",
+    run: ({ arg }) => {
+      const path = typeof arg === "string" ? arg : getContext().editorPath;
+      if (typeof path === "string") setPluginPreviewMode(path, m);
+    },
+  });
+  return [
+    mode("pluginPreview.editorOnly", "Editor Only", "editor", "edit"),
+    mode("pluginPreview.editorAndPreview", "Editor and Preview", "split", "split"),
+    mode("pluginPreview.previewOnly", "Preview Only", "preview", "eye"),
+  ];
+}
+
+const previewProviderCovers = (path: string) =>
+  findPreviewProvider(path, usePlugins.getState().plugins, useProject.getState().project?.root ?? null) !== null;
 
 export function activate(): () => void {
   const disposers = [
@@ -68,6 +96,13 @@ export function activate(): () => void {
       },
     ]),
     startPluginBridge(),
+    registerTextEditorWrapper({
+      id: "plugins.preview",
+      matches: previewProviderCovers,
+      component: lazyComponent(() => import("./preview/PluginPreviewEditor").then((m) => m.PluginPreviewEditor)),
+    }),
+    registerPluginPreviewLiveSource(),
+    registerActions([...previewModeActions()]),
     // Dev plugins (`<project>/.openidea/plugins`) depend on the open project.
     useProject.subscribe((s, prev) => {
       if (s.project?.root !== prev.project?.root) void refreshPlugins();

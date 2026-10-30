@@ -1,6 +1,6 @@
 //! UI-facing types and the event stream.
 
-use crate::manifest::{CommandDecl, Permission};
+use crate::manifest::{CommandDecl, Permission, ToolWindowAnchor};
 use crate::theme::{ThemeDef, ThemeKind};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -53,6 +53,35 @@ pub struct PluginTheme {
     pub kind: ThemeKind,
 }
 
+/// A tool window a plugin docks in the workbench. Exactly one of `content` and
+/// `command` is set: the window shows the package file, or the text the plugin's
+/// command returns when the window asks for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginToolWindow {
+    pub id: String,
+    pub title: String,
+    pub anchor: ToolWindowAnchor,
+    /// Icon name from the IDE's icon set; the UI falls back to the plugin icon.
+    pub icon: Option<String>,
+    /// Text file relative to the package directory.
+    pub content: Option<String>,
+    /// Command of this plugin whose result the window shows.
+    pub command: Option<String>,
+}
+
+/// A file preview a plugin renders through its `render-preview` export (see
+/// `contributes.previews` in `plugin.toml`). Files matching the extensions and
+/// path globs get a preview pane; the plugin renders their content as HTML.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginPreviewDecl {
+    pub id: String,
+    pub title: String,
+    pub extensions: Vec<String>,
+    pub path_globs: Vec<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginInfo {
@@ -75,6 +104,10 @@ pub struct PluginInfo {
     pub commands: Vec<CommandDecl>,
     pub languages: Vec<PluginLanguage>,
     pub themes: Vec<PluginTheme>,
+    /// Tool windows the plugin docks while it is enabled.
+    pub tool_windows: Vec<PluginToolWindow>,
+    /// File previews the plugin renders while it is enabled.
+    pub previews: Vec<PluginPreviewDecl>,
 }
 
 /// A plugin package available for installation from a local catalog
@@ -151,6 +184,87 @@ pub struct Invocation {
     pub workspace_root: Option<PathBuf>,
     /// Unsaved editor contents win over disk for `read-file`.
     pub buffer_text: Option<BufferText>,
+}
+
+/// The IDE services a plugin may reach through the gated host functions. The
+/// desktop shell supplies these; a `None` provider makes the API answer an
+/// error instead of trapping, so a headless host stays usable.
+#[derive(Clone, Default)]
+pub struct Capabilities {
+    /// Runs a program with argv in the project directory. `(root, request)`.
+    pub process: Option<ProcessProvider>,
+    /// Fetches an URL through the IDE's proxy settings.
+    pub http: Option<HttpProvider>,
+    /// Effective settings value as JSON text. `(window, key)`.
+    pub settings_get: Option<SettingsGetProvider>,
+    /// Stores a settings value. `(window, key, json)`.
+    pub settings_set: Option<SettingsSetProvider>,
+}
+
+/// What `run-process` reaches: `(project root, request)`.
+pub type ProcessProvider = Arc<dyn Fn(Option<String>, ProcessRequest) -> Result<ProcessResult, String> + Send + Sync>;
+/// What `http-fetch` reaches.
+pub type HttpProvider = Arc<dyn Fn(HttpRequest) -> Result<HttpResponse, String> + Send + Sync>;
+/// What `settings-get` reaches: `(window, key)` → the effective value as JSON text.
+pub type SettingsGetProvider = Arc<dyn Fn(Option<String>, String) -> Option<String> + Send + Sync>;
+/// What `settings-set` reaches: `(window, key, json)`.
+pub type SettingsSetProvider = Arc<dyn Fn(Option<String>, String, String) -> Result<(), String> + Send + Sync>;
+
+/// `run-process` arguments (see `wit/plugin.wit`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProcessRequest {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Resolved absolute working directory, or `None` for the project root.
+    pub cwd: Option<String>,
+    pub timeout_ms: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessResult {
+    /// -1 when the process was killed before it reported a status.
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+}
+
+/// `http-fetch` arguments; the host enforces the URL policy.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HttpRequest {
+    pub url: String,
+    pub method: Option<String>,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<String>,
+}
+
+/// `render-preview` call input (see `wit/plugin.wit`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewRequest {
+    /// Absolute path of the file being previewed.
+    pub path: String,
+    /// The path relative to the project root, with `/` separators.
+    pub project_path: String,
+    /// `id` of the `contributes.previews` entry that matched the file.
+    pub decl: String,
+    /// Current editor content, unsaved edits included.
+    pub content: String,
+}
+
+/// What a plugin's `render-preview` produced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewOutput {
+    /// Self-contained HTML document for the sandboxed preview iframe.
+    pub html: String,
+    /// Suggested page background as a hex colour.
+    pub background: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpResponse {
+    pub status: u16,
+    pub body: String,
+    pub content_type: Option<String>,
 }
 
 /// Per-call resource limits for plugin code.

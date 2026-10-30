@@ -88,6 +88,7 @@ const UNTRANSLATED = new Set<string>([
   // Products, tools and formats
   "Amazon Aurora MySQL",
   "Amazon Redshift",
+  "Android",
   "basedpyright",
   "Cargo Check",
   "Clippy",
@@ -117,6 +118,7 @@ const UNTRANSLATED = new Set<string>([
   "js-debug (Node.js / TypeScript)",
   "JSON",
   "lldb-dap (C, C++, Swift)",
+  "Logcat",
   "MariaDB",
   "Markdown",
   "Maven",
@@ -155,6 +157,7 @@ const UNTRANSLATED = new Set<string>([
   "English",
   "简体中文 (Chinese, Simplified)",
   // Terms, keywords and acronyms kept in English
+  "API",
   "DDL",
   "GOPATH",
   "GOROOT",
@@ -167,6 +170,7 @@ const UNTRANSLATED = new Set<string>([
   "NULL",
   "ORDER BY",
   "SDK",
+  "SHA-256",
   "SOCKS",
   "SSH/SSL",
   "SSL",

@@ -193,7 +193,9 @@ fn manager_at(dir: &Path, models_file: &Path, agent: Arc<FakeAgent>) -> AgentMan
             worktrees_dir: dir.join("worktrees"),
             models_file: models_file.to_path_buf(),
             custom_agents_dir: None,
-            home_dir: None,
+            // The fixture's parent stands in for the user's home, so the skill
+            // walk stops above the project instead of reaching the machine's.
+            home_dir: dir.parent().map(std::path::Path::to_path_buf),
         },
         tokio::runtime::Handle::current(),
         connector,
@@ -581,7 +583,9 @@ async fn real_claude_task_in_a_worktree() {
             worktrees_dir: tmp.path().join("wt"),
             models_file: tmp.path().join("models.json"),
             custom_agents_dir: None,
-            home_dir: None,
+            // The fixture's parent stands in for the user's home, so the skill
+            // walk stops above the project instead of reaching the machine's.
+            home_dir: Some(tmp.path().to_path_buf()),
         },
         tokio::runtime::Handle::current(),
     );

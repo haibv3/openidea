@@ -7,9 +7,16 @@ import { EditorSelection } from "@codemirror/state";
 import type { ActiveTheme, PluginEvent, PluginInfo } from "@/bindings";
 import { activeEditor, useEditorRegistry } from "@/editor/api";
 import { registerAction, type Action } from "@/platform/actions";
-import { notifications } from "@/workbench/contributions";
+import { notifications, registerToolWindow } from "@/workbench/contributions";
 import { applyThemeAttributes, currentThemeId, syncWindowBackground, windowBackgroundHex } from "@/workbench/theme";
 import { pluginsBackend } from "./backend";
+import {
+  PluginWindowView,
+  forgetPluginWindow,
+  pluginWindowId,
+  rememberPluginWindow,
+  type WindowSpec,
+} from "./PluginWindowView";
 import { refreshPlugins, runPluginCommand, usePlugins } from "./store";
 import { tx } from "@/platform/i18n";
 
@@ -60,6 +67,67 @@ export function syncPluginActions(): () => void {
   return () => {
     unsubscribe();
     registered.forEach((e) => e.dispose());
+    registered.clear();
+  };
+}
+
+// --- tool windows -----------------------------------------------------------
+
+/**
+ * Docks a tool window per window contributed by an enabled plugin. Windows of
+ * disabled or failed plugins disappear with them.
+ */
+export function syncPluginToolWindows(): () => void {
+  const registered = new Map<string, { title: string; spec: WindowSpec; dispose: () => void }>();
+  const wanted = (plugins: readonly PluginInfo[]) => {
+    const out = new Map<string, { title: string; spec: WindowSpec }>();
+    for (const p of plugins) {
+      if (p.status !== "active" && p.status !== "static") continue;
+      for (const w of p.toolWindows) {
+        out.set(pluginWindowId(p.id, w.id), {
+          title: w.title,
+          spec: { pluginId: p.id, pluginName: p.name, window: w },
+        });
+      }
+    }
+    return out;
+  };
+  const apply = (plugins: readonly PluginInfo[]) => {
+    const next = wanted(plugins);
+    for (const [id, entry] of registered) {
+      if (!next.has(id)) {
+        entry.dispose();
+        forgetPluginWindow(entry.spec);
+        registered.delete(id);
+      }
+    }
+    for (const [id, { title, spec }] of next) {
+      // Re-register only when the title or anchor changed: the workbench picks
+      // the window up from the contribution map.
+      const anchor = spec.window.anchor;
+      if (registered.get(id)?.title === `${title}/${anchor}`) continue;
+      registered.get(id)?.dispose();
+      rememberPluginWindow(spec.pluginId, spec.pluginName, spec.window);
+      const dispose = registerToolWindow({
+        id,
+        title,
+        icon: spec.window.icon ?? "plugin",
+        anchor,
+        component: PluginWindowView,
+      });
+      registered.set(id, { title: `${title}/${anchor}`, spec, dispose });
+    }
+  };
+  apply(usePlugins.getState().plugins);
+  const unsubscribe = usePlugins.subscribe((s, prev) => {
+    if (s.plugins !== prev.plugins) apply(s.plugins);
+  });
+  return () => {
+    unsubscribe();
+    registered.forEach((e) => {
+      e.dispose();
+      forgetPluginWindow(e.spec);
+    });
     registered.clear();
   };
 }
@@ -254,6 +322,7 @@ export function startPluginBridge(): () => void {
   const disposers = [
     pluginsBackend().onEvent(handlePluginEvent),
     syncPluginActions(),
+    syncPluginToolWindows(),
     trackPluginTheme(),
     trackActiveFile(),
   ];

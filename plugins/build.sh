@@ -3,7 +3,8 @@
 # component directly; no cargo-component / wasm-tools needed).
 #
 #   plugins/build.sh            # all plugins with a Cargo.toml
-#   plugins/build.sh hello      # one plugin
+#   plugins/build.sh hello      # one plugin, by name under plugins/
+#   plugins/build.sh crates/ide-plugin/tests/fixtures/preview   # by path
 #
 # Output: <plugin>/dist/plugin.wasm (referenced by `wasm = ...` in plugin.toml).
 set -euo pipefail
@@ -23,7 +24,12 @@ build() {
 
 if [ $# -gt 0 ]; then
   for p in "$@"; do
-    case "$p" in /*) build "$p" ;; *) build "$here/$p" ;; esac
+    case "$p" in
+      /*) build "$p" ;;
+      # A name under plugins/, else a path relative to the working directory.
+      "$here"/*|*/*) build "$p" ;;
+      *) build "$here/$p" ;;
+    esac
   done
 else
   for manifest in "$here"/*/Cargo.toml; do build "$(dirname "$manifest")"; done

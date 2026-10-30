@@ -1,0 +1,8 @@
+This is a demo file for the plugin preview mechanism (not a real Android file).
+
+The `preview-fixture` dev plugin (in `.openidea/plugins/`) matches the `demo`
+extension and echoes this text into a sandboxed HTML preview pane — open this
+file and use the Editor / Editor and Preview / Preview toolbar to see the
+plugin preview pipeline end to end.
+
+Try editing this line while the preview is open.

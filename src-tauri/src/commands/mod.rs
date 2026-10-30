@@ -8,6 +8,7 @@
 
 pub mod agent;
 pub mod analysis;
+pub mod android;
 pub mod app;
 pub mod build;
 pub mod bytes;
@@ -321,6 +322,20 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         sdk::sdk_python_create_venv,
         sdk::sdk_python_packages,
         sdk::sdk_python_pip,
+        android::android_sdk,
+        android::android_devices,
+        android::android_avds,
+        android::android_emulator_start,
+        android::android_emulator_stop,
+        android::android_install,
+        android::android_launch,
+        android::android_restart,
+        android::android_jdwp_forward,
+        android::android_ls,
+        android::android_pull,
+        android::android_push,
+        android::android_logcat,
+        android::android_deploy,
         window::window_open_project,
         window::window_open_files,
         window::window_open_remote,
@@ -372,9 +387,13 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         plugin::plugin_uninstall,
         plugin::plugin_reload,
         plugin::plugin_run_command,
+        plugin::plugin_render_preview,
+        plugin::plugin_tool_window_content,
         plugin::plugin_set_active_file,
         plugin::plugin_set_theme,
         plugin::plugin_set_theme_frame,
+        plugin::plugin_registry_index,
+        plugin::plugin_registry_install,
         perf::app_metrics,
         perf::clear_caches,
         analysis::inspect_code,

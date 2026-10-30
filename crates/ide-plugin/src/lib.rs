@@ -2,7 +2,8 @@
 //!
 //! A plugin is a directory with a `plugin.toml` manifest ([`PluginManifest`])
 //! and, optionally, a WebAssembly component implementing the
-//! `openidea:plugin/plugin@0.1.0` world (`wit/plugin.wit`). Contribution-only
+//! `openidea:plugin/plugin` world (`wit/plugin.wit`, API level 0.2).
+//! Contribution-only
 //! plugins (themes, languages) need no code.
 //!
 //! Each plugin with code runs in its own wasmtime `Store` with WASI preview 2
@@ -15,6 +16,7 @@
 //! (dev plugins, loaded by [`PluginHost::sync_project`]).
 
 mod manifest;
+mod registry;
 mod runtime;
 mod sandbox;
 mod theme;
@@ -22,6 +24,10 @@ mod types;
 
 pub use manifest::{
     API_VERSION, CommandDecl, Contributions, FileDecl, MANIFEST_FILE, Permission, PluginManifest, ThemeDecl,
+    ToolWindowAnchor, ToolWindowDecl,
+};
+pub use registry::{
+    MAX_PACKAGE_BYTES, RegistryPlugin, RegistryProgress, extract_package, package_url_ok, parse_index, verify_sha256,
 };
 pub use sandbox::resolve_in_root;
 pub use theme::{ThemeDef, ThemeKind};
@@ -38,6 +44,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const STATE_FILE: &str = "state.json";
+/// Longest text a plugin's tool window shows.
+const MAX_WINDOW_TEXT_BYTES: usize = 1 << 20;
 /// Top-level files copied with a package on install besides those the manifest references.
 const LICENSE_FILES: &[&str] =
     &["LICENSE", "LICENSE.md", "LICENSE.txt", "NOTICE", "NOTICE.md", "NOTICE.txt", "COPYING"];
@@ -96,6 +104,7 @@ pub struct PluginHost {
     engine: PluginEngine,
     plugins_dir: PathBuf,
     sink: Arc<dyn PluginEventSink>,
+    capabilities: Capabilities,
     limits: Limits,
     plugins: RwLock<BTreeMap<String, Arc<LoadedPlugin>>>,
     state: Mutex<PersistedState>,
@@ -109,7 +118,14 @@ pub struct PluginHost {
 
 impl PluginHost {
     /// Creates the host; call [`load_all`](Self::load_all) to load installed plugins.
-    pub fn new(plugins_dir: PathBuf, sink: Arc<dyn PluginEventSink>, limits: Limits) -> IdeResult<Self> {
+    /// `capabilities` are the IDE services the gated host functions reach; use
+    /// [`Capabilities::default`] for a host that offers plugins no side effects.
+    pub fn new(
+        plugins_dir: PathBuf,
+        sink: Arc<dyn PluginEventSink>,
+        capabilities: Capabilities,
+        limits: Limits,
+    ) -> IdeResult<Self> {
         std::fs::create_dir_all(&plugins_dir)?;
         let state = std::fs::read_to_string(plugins_dir.join(STATE_FILE))
             .ok()
@@ -119,6 +135,7 @@ impl PluginHost {
             engine: PluginEngine::new().map_err(IdeError::internal)?,
             plugins_dir,
             sink,
+            capabilities,
             limits,
             plugins: RwLock::default(),
             state: Mutex::new(state),
@@ -358,6 +375,70 @@ impl PluginHost {
         }
     }
 
+    /// Renders a preview with the plugin's optional `render-preview` export
+    /// (see `wit/plugin.wit`). Blocks for up to the configured time limit.
+    pub fn render_preview(
+        &self,
+        id: &str,
+        request: PreviewRequest,
+        invocation: Invocation,
+    ) -> IdeResult<PreviewOutput> {
+        let plugin = self.get(id)?;
+        let client = invocation.client.clone();
+        let mut runtime = plugin.runtime.lock();
+        let Some(rt) = runtime.as_mut() else {
+            let meta = plugin.meta.lock();
+            return Err(IdeError::unavailable(match meta.status {
+                PluginStatus::Disabled => format!("plugin {id:?} is disabled"),
+                PluginStatus::Static => format!("plugin {id:?} has no code to render previews"),
+                _ => format!("plugin {id:?} is not running: {}", meta.error.as_deref().unwrap_or("failed")),
+            }));
+        };
+        match rt.render_preview(&request, invocation) {
+            Ok((output, fx)) => {
+                drop(runtime);
+                self.apply_effects(&plugin, fx);
+                Ok(output)
+            }
+            Err(CallError::Guest(e)) => Err(IdeError::internal(e)),
+            Err(CallError::Trap(e)) => {
+                *runtime = None;
+                drop(runtime);
+                self.fail(&plugin, &e, client.as_deref());
+                Err(IdeError::internal(format!("plugin {id:?} {e}")))
+            }
+        }
+    }
+
+    /// The text a plugin's tool window shows: its package `content` file, read
+    /// from the plugin's own directory (never outside it) and capped. A
+    /// command-backed window answers an error; the UI runs the command instead.
+    pub fn tool_window_content(&self, plugin_id: &str, window_id: &str) -> IdeResult<String> {
+        let plugin = self.get(plugin_id)?;
+        let window = plugin
+            .registrations
+            .lock()
+            .tool_windows
+            .iter()
+            .find(|w| w.id == window_id)
+            .cloned()
+            .ok_or_else(|| IdeError::not_found(format!("plugin {plugin_id:?} has no tool window {window_id:?}")))?;
+        let rel = window
+            .content
+            .ok_or_else(|| IdeError::invalid(format!("tool window {window_id:?} shows a command's output")))?;
+        let root = plugin.dir.canonicalize().map_err(|e| IdeError::internal(e.to_string()))?;
+        let file = sandbox::resolve_in_root(&root, &rel.to_string_lossy()).map_err(IdeError::invalid)?;
+        let text = sandbox::read_text(&file).map_err(IdeError::invalid)?;
+        if text.len() <= MAX_WINDOW_TEXT_BYTES {
+            return Ok(text);
+        }
+        let mut end = MAX_WINDOW_TEXT_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Ok(format!("{}\n… truncated", &text[..end]))
+    }
+
     /// The UI reports which file its focused editor shows (for `active-file`).
     pub fn set_active_file(&self, client: &str, path: Option<String>) {
         let mut files = self.active_files.lock();
@@ -513,6 +594,7 @@ impl PluginHost {
                 plugin_id: plugin.manifest.id.clone(),
                 version: plugin.manifest.version.clone(),
                 permissions: plugin.manifest.permissions.clone(),
+                capabilities: self.capabilities.clone(),
                 registrations: plugin.registrations.clone(),
                 sink: self.sink.clone(),
                 active_file: Arc::new(move |client| client.and_then(|c| active_files.lock().get(c).cloned())),
@@ -621,6 +703,29 @@ impl PluginHost {
                 .iter()
                 .map(|t| PluginTheme { id: t.id.clone(), name: t.name.clone(), kind: t.kind })
                 .collect(),
+            tool_windows: regs
+                .tool_windows
+                .iter()
+                .map(|w| PluginToolWindow {
+                    id: w.id.clone(),
+                    title: w.title.clone(),
+                    anchor: w.anchor,
+                    icon: w.icon.clone(),
+                    content: w.content.as_ref().map(|p| p.to_string_lossy().into_owned()),
+                    command: w.command.clone(),
+                })
+                .collect(),
+            previews: m
+                .contributes
+                .previews
+                .iter()
+                .map(|p| PluginPreviewDecl {
+                    id: p.id.clone(),
+                    title: p.title.clone(),
+                    extensions: p.extensions.clone(),
+                    path_globs: p.path_globs.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -631,7 +736,7 @@ impl Drop for PluginHost {
     }
 }
 
-fn is_hex_color(s: &str) -> bool {
+pub(crate) fn is_hex_color(s: &str) -> bool {
     s.strip_prefix('#').is_some_and(|h| matches!(h.len(), 3 | 6 | 8) && h.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
@@ -689,6 +794,9 @@ fn static_contributions(dir: &Path, m: &PluginManifest) -> Result<Registrations,
     let mut regs = Registrations::default();
     for cmd in &m.contributes.commands {
         regs.add_command(cmd.clone());
+    }
+    for w in &m.contributes.tool_windows {
+        regs.add_tool_window(w.clone());
     }
     let read = |p: &Path| std::fs::read_to_string(dir.join(p)).map_err(|e| format!("{}: {e}", p.display()));
     for f in &m.contributes.languages {

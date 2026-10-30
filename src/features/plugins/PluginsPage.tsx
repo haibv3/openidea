@@ -3,12 +3,13 @@
  * gear menu, a searchable list on the left (enable checkboxes) and the
  * selected plugin's details on the right (Overview / What's New).
  *
- * There is no network repository: Available lists the plugin packages
- * available locally (`plugin_catalog`) and installs them from disk.
+ * Available lists packages published by the configured registry
+ * (`plugins.registryUrl`, an `index.json` anyone can host) and the plugin
+ * packages available on this machine (`plugin_catalog`).
  */
 import { useEffect, useMemo, useState, type MouseEvent, type ReactNode } from "react";
 import clsx from "clsx";
-import type { CatalogPlugin, Permission, PluginInfo, PluginStatus } from "@/bindings";
+import type { CatalogPlugin, Permission, PluginInfo, PluginStatus, RegistryPlugin } from "@/bindings";
 import {
   Badge,
   Button,
@@ -16,6 +17,7 @@ import {
   EmptyState,
   Icon,
   IconButton,
+  Input,
   Kbd,
   SearchField,
   Spinner,
@@ -28,10 +30,15 @@ import { pluginActionId } from "./bridge";
 import {
   compareVersions,
   installFromDisk,
+  installFromRegistry,
+  loadRegistryUrl,
   refreshCatalog,
   refreshPlugins,
+  refreshRegistry,
+  registryState,
   reloadPlugin,
   runPluginCommand,
+  saveRegistryUrl,
   selectPluginTheme,
   setAllInstalledEnabled,
   setPluginEnabled,
@@ -50,11 +57,22 @@ const STATUS: Record<PluginStatus, { label: string; tone: "success" | "accent" |
 
 export const PERMISSION_TEXT: Record<Permission, string> = {
   "project-read": "Read files inside the open project",
+  "project-write": "Create, change and delete files inside the open project",
   "editor-read": "See which file is open in the editor",
   "editor-write": "Insert text into the active editor",
+  process: "Run programs from the project directory",
+  net: "Make web requests",
+  "settings-read": "Read IDE settings",
+  "settings-write": "Change IDE settings",
 };
 
-export const NO_REPOSITORY = "There is no online plugin repository";
+export const NO_REPOSITORY = "No plugin repository is configured";
+
+export function filterRegistry(registry: readonly RegistryPlugin[], query: string): RegistryPlugin[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return [...registry];
+  return registry.filter((p) => matches([p.name, p.id, p.description, ...(p.authors ?? [])], q));
+}
 
 type Tab = "marketplace" | "installed";
 
@@ -193,6 +211,75 @@ function CatalogRow({ entry, selected, onSelect }: { entry: CatalogPlugin; selec
         </span>
       </button>
       <CatalogButton entry={entry} compact />
+    </li>
+  );
+}
+
+/** Install / Update for a published package, with its download percent. */
+function RegistryButton({ entry, compact }: { entry: RegistryPlugin; compact?: boolean }) {
+  const plugins = usePlugins((s) => s.plugins);
+  const installing = usePlugins((s) => s.installing);
+  const percent = usePlugins((s) => s.registryProgress[entry.id]);
+  const state = registryState(entry, plugins);
+  if (state === "installed") {
+    return <span className={styles.installedTag}>{tx("Installed")}</span>;
+  }
+  const updating = state === "update";
+  const label =
+    percent == null
+      ? tx(updating ? "Update" : "Install")
+      : updating
+        ? tx`Updating ${percent}%`
+        : tx`Installing ${percent}%`;
+  return (
+    <Button
+      size="small"
+      variant={compact ? "secondary" : "primary"}
+      disabled={installing}
+      aria-label={updating ? tx`Update ${entry.name}` : tx`Install ${entry.name}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        void installFromRegistry(entry.id);
+      }}
+    >
+      {label}
+    </Button>
+  );
+}
+
+function RegistryRow({
+  entry,
+  selected,
+  onSelect,
+}: {
+  entry: RegistryPlugin;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <li className={clsx(styles.row, selected && styles.rowSelected)}>
+      <button
+        type="button"
+        className={styles.rowMain}
+        aria-current={selected || undefined}
+        onClick={onSelect}
+        title={entry.description || entry.name}
+      >
+        <PluginIcon />
+        <span className={styles.rowText}>
+          <span className={styles.rowName}>{entry.name}</span>
+          <span className={styles.rowMeta}>
+            <span className={styles.rowVendor}>{vendorOf(entry.authors ?? []) || entry.id}</span>
+            <span>{entry.version}</span>
+            {!entry.sha256 && (
+              <span className={styles.rowVendor}>
+                <T>no checksum</T>
+              </span>
+            )}
+          </span>
+        </span>
+      </button>
+      <RegistryButton entry={entry} compact />
     </li>
   );
 }
@@ -367,6 +454,21 @@ function InstalledDetails({ plugin }: { plugin: PluginInfo }) {
           </ul>
         </Section>
       )}
+
+      {plugin.toolWindows.length > 0 && (
+        <Section title="Tool Windows">
+          <ul className={styles.items}>
+            {plugin.toolWindows.map((w) => (
+              <li key={w.id} className={styles.item}>
+                <span className={styles.itemMain}>{w.title}</span>
+                <span className={styles.mono}>
+                  {w.content ?? plugin.commands.find((c) => c.id === w.command)?.title ?? w.command}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
     </>
   );
 
@@ -504,6 +606,73 @@ function CatalogDetails({ entry }: { entry: CatalogPlugin }) {
   );
 }
 
+/** Details of a package published by the registry. */
+function RegistryDetails({ entry }: { entry: RegistryPlugin }) {
+  const overview = (
+    <>
+      {entry.description && <p className={styles.description}>{entry.description}</p>}
+      <dl className={styles.facts}>
+        <dt>
+          <T>Id</T>
+        </dt>
+        <dd className={styles.mono}>{entry.id}</dd>
+        <dt>
+          <T>Download</T>
+        </dt>
+        <dd className={styles.mono} title={entry.url}>
+          {entry.url}
+        </dd>
+        <dt>
+          <T>SHA-256</T>
+        </dt>
+        <dd className={styles.mono}>
+          {entry.sha256 ? (
+            entry.sha256.slice(0, 16)
+          ) : (
+            <span className={styles.warnText}>
+              <T>not published</T>
+            </span>
+          )}
+        </dd>
+        {entry.size != null && (
+          <>
+            <dt>
+              <T>Size</T>
+            </dt>
+            <dd>{`${Math.round(entry.size / 1024)} KiB`}</dd>
+          </>
+        )}
+        {entry.openideaApi && (
+          <>
+            <dt>
+              <T>API</T>
+            </dt>
+            <dd className={styles.mono}>{entry.openideaApi}</dd>
+          </>
+        )}
+      </dl>
+    </>
+  );
+  return (
+    <div className={styles.details} aria-label={`${entry.name} details`}>
+      <header className={styles.header}>
+        <PluginIcon large />
+        <div className={styles.headerText}>
+          <h2 className={styles.title}>{entry.name}</h2>
+          {(entry.authors?.length ?? 0) > 0 && <div className={styles.authors}>{vendorOf(entry.authors ?? [])}</div>}
+          <div className={styles.titleLine}>
+            <span className={styles.version}>{entry.version}</span>
+          </div>
+        </div>
+        <div className={styles.headerActions}>
+          <RegistryButton entry={entry} />
+        </div>
+      </header>
+      <DetailTabs notes={entry.changeNotes ?? null} overview={overview} />
+    </div>
+  );
+}
+
 function gearMenu(plugins: readonly PluginInfo[], install: () => void): MenuItem[] {
   const installed = plugins.filter((p) => p.source === "installed");
   return [
@@ -526,22 +695,31 @@ function gearMenu(plugins: readonly PluginInfo[], install: () => void): MenuItem
       run: () => {
         void refreshPlugins();
         void refreshCatalog();
+        void refreshRegistry();
       },
     },
   ];
 }
 
 export function PluginsPage() {
-  const { plugins, loaded, loading, error, installing, catalog, catalogError } = usePlugins();
+  const { plugins, loaded, loading, error, installing, catalog, catalogError, registry, registryUrl, registryError } =
+    usePlugins();
   const [tab, setTab] = useState<Tab>("installed");
   const [query, setQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [selectedCatalogId, setSelectedCatalogId] = useState<string | null>(null);
+  const [availableSel, setAvailableSel] = useState<{ kind: "registry" | "local"; id: string } | null>(null);
+  const [repoDraft, setRepoDraft] = useState("");
 
   useEffect(() => {
     void refreshPlugins();
     void refreshCatalog();
+    void loadRegistryUrl().then((url) => {
+      setRepoDraft(url);
+      if (url) void refreshRegistry(url);
+    });
   }, []);
+
+  useEffect(() => setRepoDraft(registryUrl), [registryUrl]);
 
   const shown = useMemo(() => filterPlugins(plugins, query), [plugins, query]);
   const downloaded = shown.filter((p) => p.source === "installed");
@@ -549,7 +727,13 @@ export function PluginsPage() {
   const selected = shown.find((p) => p.id === selectedId) ?? shown[0] ?? null;
 
   const catalogShown = useMemo(() => filterCatalog(catalog ?? [], query), [catalog, query]);
-  const selectedEntry = catalogShown.find((c) => c.id === selectedCatalogId) ?? catalogShown[0] ?? null;
+  const registryShown = useMemo(() => filterRegistry(registry ?? [], query), [registry, query]);
+  const pickedRegistry =
+    availableSel?.kind === "registry" ? (registryShown.find((p) => p.id === availableSel.id) ?? null) : null;
+  const pickedLocal =
+    availableSel?.kind === "local" ? (catalogShown.find((c) => c.id === availableSel.id) ?? null) : null;
+  const selectedRegistry = pickedRegistry ?? (pickedLocal ? null : (registryShown[0] ?? null));
+  const selectedEntry = pickedLocal ?? (pickedRegistry ? null : (catalogShown[0] ?? null));
 
   const install = async () => {
     const id = await installFromDisk();
@@ -633,22 +817,45 @@ export function PluginsPage() {
             </ul>
           ) : (
             <ul className={styles.list} aria-label={tx("Available plugins")}>
-              <li className={styles.notice} role="note">
-                <Icon name="info" size={14} />
-                <span>{tx`${NO_REPOSITORY}. Showing plugin packages available on this machine.`}</span>
+              <li className={styles.repoRow}>
+                <Input
+                  value={repoDraft}
+                  onChange={(e) => setRepoDraft(e.target.value)}
+                  placeholder="https://example.com/plugins/index.json"
+                  aria-label="Plugin repository URL"
+                  className={styles.repoInput}
+                  mono
+                />
+                <Button
+                  size="small"
+                  disabled={repoDraft.trim() === registryUrl.trim()}
+                  onClick={() => void saveRegistryUrl(repoDraft)}
+                >
+                  <T>Browse</T>
+                </Button>
               </li>
+              {registryShown.length > 0 && <ListHeader title="Registry" count={registryShown.length} />}
+              {registryShown.map((p) => (
+                <RegistryRow
+                  key={p.id}
+                  entry={p}
+                  selected={p.id === selectedRegistry?.id}
+                  onSelect={() => setAvailableSel({ kind: "registry", id: p.id })}
+                />
+              ))}
+              {registryError && <li className={clsx(styles.listEmpty, styles.errorText)}>{registryError}</li>}
               {catalogShown.length > 0 && <ListHeader title="Local" count={catalogShown.length} />}
               {catalogShown.map((c) => (
                 <CatalogRow
                   key={c.id}
                   entry={c}
                   selected={c.id === selectedEntry?.id}
-                  onSelect={() => setSelectedCatalogId(c.id)}
+                  onSelect={() => setAvailableSel({ kind: "local", id: c.id })}
                 />
               ))}
-              {catalog && catalogShown.length === 0 && (
+              {!registryShown.length && !catalogShown.length && !registryError && (catalog || registry) && (
                 <li className={styles.listEmpty}>
-                  {catalog.length === 0 ? tx("No local plugin packages.") : tx("No plugins match.")}
+                  {query ? tx("No plugins match.") : tx("No plugin packages found.")}
                 </li>
               )}
               {catalogError && <li className={clsx(styles.listEmpty, styles.errorText)}>{catalogError}</li>}
@@ -666,12 +873,14 @@ export function PluginsPage() {
               <T>inside your project.</T>
             </EmptyState>
           )
+        ) : selectedRegistry ? (
+          <RegistryDetails key={selectedRegistry.id} entry={selectedRegistry} />
         ) : selectedEntry ? (
           <CatalogDetails key={selectedEntry.id} entry={selectedEntry} />
         ) : (
           <EmptyState className={styles.detailsEmpty} title={NO_REPOSITORY}>
-            <T>Install a plugin folder with</T> <code>plugin.toml</code>{" "}
-            <T>via the gear menu › Install Plugin from Disk….</T>
+            <T>Publish an</T> <code>index.json</code> <T>and paste its URL above, or install a plugin folder with</T>{" "}
+            <code>plugin.toml</code> <T>via the gear menu › Install Plugin from Disk….</T>
           </EmptyState>
         )}
       </div>

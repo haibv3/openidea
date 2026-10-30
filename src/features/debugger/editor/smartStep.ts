@@ -28,8 +28,20 @@ function callPattern(name: string, flags: string): RegExp {
   return new RegExp(`${name.replace(/\$/g, "\\$")}\\s*\\(`, flags);
 }
 
+/**
+ * The code point before `at`, or `null` at the start of the text. A surrogate
+ * pair is one character, so the unit before a match may start one lower.
+ */
+function codePointBefore(text: string, at: number): string | null {
+  if (at <= 0) return null;
+  const last = text.charCodeAt(at - 1);
+  const start = last >= 0xdc00 && last <= 0xdfff ? at - 2 : at - 1;
+  return text.slice(Math.max(0, start), at);
+}
+
 function isCallBoundary(text: string, from: number): boolean {
-  return !/[\p{L}\p{N}_$]$/u.test(text.slice(Math.max(0, from - 2), from));
+  const before = codePointBefore(text, from);
+  return !before || !IDENT.test(before);
 }
 
 function identifierEnd(text: string, from: number): number {

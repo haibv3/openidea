@@ -1,0 +1,17 @@
+[package]
+name = "ide-android"
+description = "Android toolchain support: SDK discovery and adb devices, installs, launches and logcat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ide-core.workspace = true
+serde.workspace = true
+specta.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

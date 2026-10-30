@@ -74,7 +74,7 @@ fn fixture(limits: Limits) -> Fixture {
         let events = events.clone();
         move |client: Option<&str>, e: PluginEvent| events.lock().push((client.map(str::to_owned), e))
     };
-    let host = PluginHost::new(plugins_dir.clone(), Arc::new(sink), limits).unwrap();
+    let host = PluginHost::new(plugins_dir.clone(), Arc::new(sink), Capabilities::default(), limits).unwrap();
     Fixture { host, events, _tmp: tmp, plugins_dir, project }
 }
 
@@ -94,6 +94,21 @@ impl Fixture {
     fn take_events(&self) -> Vec<(Option<String>, PluginEvent)> {
         std::mem::take(&mut *self.events.lock())
     }
+}
+
+#[test]
+fn plugin_tool_window_shows_its_package_file() {
+    let f = fixture(Limits::default());
+    let info = f.host.install_from_dir(&sample("hello")).unwrap();
+    // The window is declared in the manifest and its file is copied on install.
+    assert_eq!(info.tool_windows.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(), ["about"]);
+    assert!(f.plugins_dir.join("hello/docs/about.md").is_file());
+    let text = f.host.tool_window_content("hello", "about").unwrap();
+    assert!(text.contains("Hello — sample plugin"), "{text}");
+
+    let error = f.host.tool_window_content("hello", "elsewhere").unwrap_err();
+    assert!(error.message.contains("no tool window"), "{error:?}");
+    assert!(f.host.tool_window_content("ghost", "about").unwrap_err().message.contains("no plugin"));
 }
 
 #[test]
@@ -357,7 +372,13 @@ fn state_persists_across_restarts() {
     f.host.set_theme(Some(("theme-harbor-night", "harbor-night"))).unwrap();
     f.host.set_theme_frame(Some("#1f252e")).unwrap();
 
-    let again = PluginHost::new(f.plugins_dir.clone(), Arc::new(|_: Option<&str>, _| {}), Limits::default()).unwrap();
+    let again = PluginHost::new(
+        f.plugins_dir.clone(),
+        Arc::new(|_: Option<&str>, _| {}),
+        Capabilities::default(),
+        Limits::default(),
+    )
+    .unwrap();
     // Known before the plugins are loaded: new windows open in the theme's frame colour.
     assert_eq!(again.startup_frame().as_deref(), Some("#1f252e"));
     assert!(!again.wait_initial_load(Duration::from_millis(1)));
@@ -473,4 +494,129 @@ fn catalog_lists_sample_packages() {
     assert_eq!((theme.theme_count, theme.has_code), (1, false));
     let x = catalog.iter().find(|c| c.id == "x").unwrap();
     assert!(x.problem.as_deref().unwrap().contains("plugin.wasm"));
+}
+
+fn preview_pkg() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/preview")
+}
+
+fn preview_request(project_path: &str, content: &str) -> PreviewRequest {
+    PreviewRequest {
+        path: format!("/project/{project_path}"),
+        project_path: project_path.to_owned(),
+        decl: "demo".into(),
+        content: content.to_owned(),
+    }
+}
+
+/// Components built before `render-preview` existed keep loading: the export is
+/// probed on the instance, never required, and calling it on such a plugin is
+/// a handled error that leaves the plugin usable.
+#[test]
+fn components_without_render_preview_still_load() {
+    let f = fixture(Limits::default());
+    let info = f.host.install_from_dir(&sample("hello")).unwrap();
+    assert_eq!(info.status, PluginStatus::Active, "{:?}", info.error);
+    assert!(info.previews.is_empty());
+
+    let error = f.host.render_preview("hello", preview_request("a.txt", "hi"), f.inv()).unwrap_err();
+    assert!(error.message.contains("render-preview"), "{error:?}");
+    // The call was a handled guest error, not a trap: the plugin lives on.
+    assert_eq!(f.status("hello"), PluginStatus::Active);
+    assert!(f.run("hello", "insert-date", None).unwrap().is_some());
+}
+
+#[test]
+fn render_preview_calls_the_plugin() {
+    let f = fixture(Limits::default());
+    let info = f.host.install_from_dir(&preview_pkg()).unwrap();
+    assert_eq!(info.status, PluginStatus::Active, "{:?}", info.error);
+    assert_eq!(info.previews.len(), 1);
+    assert_eq!(info.previews[0].id, "demo");
+    assert_eq!(info.previews[0].extensions, ["demo"]);
+
+    let out = f.host.render_preview("preview-fixture", preview_request("app/x.demo", "hello"), f.inv()).unwrap();
+    assert!(out.html.contains(r#"data-decl="demo""#), "{}", out.html);
+    assert!(out.html.contains("app/x.demo") && out.html.contains("hello"));
+    assert_eq!(out.background, None);
+
+    let dark = f.host.render_preview("preview-fixture", preview_request("app/x.demo", "dark mode"), f.inv()).unwrap();
+    assert_eq!(dark.background.as_deref(), Some("#111111"));
+
+    // A guest error surfaces as the message; the plugin stays enabled.
+    let error = f.host.render_preview("preview-fixture", preview_request("a.demo", "!nope"), f.inv()).unwrap_err();
+    assert!(error.message.contains("preview refused: nope"), "{error:?}");
+    assert_eq!(f.status("preview-fixture"), PluginStatus::Active);
+
+    // Non-preview plugins answer a not-found error.
+    let missing = f.host.render_preview("ghost", preview_request("a.demo", "x"), f.inv()).unwrap_err();
+    assert!(missing.message.contains("no plugin"), "{missing:?}");
+}
+
+/// The `fixtures/android-app` demo path: a preview plugin dropped into
+/// `<project>/.openidea/plugins/` renders previews without an install step.
+#[test]
+fn dev_plugin_previews_render_for_their_project() {
+    let f = fixture(Limits::default());
+    let dev = f.project.join(DEV_PLUGINS_DIR).join("preview-fixture");
+    copy_dir(&preview_pkg(), &dev);
+    f.host.sync_project(&f.project);
+
+    let info = f.host.info_of("preview-fixture").unwrap();
+    assert_eq!(info.source, PluginSource::Dev);
+    assert_eq!(info.status, PluginStatus::Active, "{:?}", info.error);
+    assert_eq!(info.previews[0].id, "demo");
+
+    // The IDE hands over the project-relative path alongside the content.
+    let layout = f.project.join("app/src/main/res/layout/main.xml");
+    std::fs::create_dir_all(layout.parent().unwrap()).unwrap();
+    std::fs::write(&layout, "<LinearLayout />").unwrap();
+    let out = f
+        .host
+        .render_preview(
+            "preview-fixture",
+            PreviewRequest {
+                path: layout.to_string_lossy().into_owned(),
+                project_path: "app/src/main/res/layout/main.xml".into(),
+                decl: "demo".into(),
+                content: "dark".into(),
+            },
+            f.inv(),
+        )
+        .unwrap();
+    assert!(out.html.contains("app/src/main/res/layout/main.xml"), "{}", out.html);
+    assert_eq!(out.background.as_deref(), Some("#111111"));
+
+    // Dev plugins vanish with their directory.
+    std::fs::remove_dir_all(&dev).unwrap();
+    f.host.sync_project(&f.project);
+    assert!(f.host.render_preview("preview-fixture", preview_request("a.xml", "x"), f.inv()).is_err());
+}
+
+/// The real `plugins/android-preview` component renders an XML layout
+/// end-to-end (the component is checked in; rebuild with
+/// `plugins/build.sh android-preview`).
+#[test]
+fn android_preview_plugin_renders_layouts() {
+    let f = fixture(Limits::default());
+    let info = f.host.install_from_dir(&sample("android-preview")).unwrap();
+    assert_eq!(info.status, PluginStatus::Active, "{:?}", info.error);
+    assert_eq!(info.previews.len(), 2);
+    assert!(info.previews.iter().any(|p| p.id == "layout-xml"));
+
+    let request = PreviewRequest {
+        path: "app/src/main/res/layout/activity_main.xml".into(),
+        project_path: f.project.display().to_string(),
+        decl: "layout-xml".into(),
+        content: r#"<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent"
+    android:orientation="vertical">
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="Hi from the layout"/>
+</LinearLayout>"#
+            .into(),
+    };
+    let out = f.host.render_preview("android-preview", request, f.inv()).unwrap();
+    assert!(out.html.contains("Hi from the layout"), "{}", out.html);
+    assert!(out.html.contains("class=\"ap-screen\""), "{}", out.html);
 }

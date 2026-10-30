@@ -1,6 +1,7 @@
 /** Installed plugins, the selected plugin theme, and the operations on them. */
 import { create } from "zustand";
-import type { ActiveTheme, CatalogPlugin, PluginInfo } from "@/bindings";
+import type { ActiveTheme, CatalogPlugin, PluginInfo, RegistryPlugin } from "@/bindings";
+import { call, commands } from "@/platform/ipc";
 import { notifications } from "@/workbench/contributions";
 import { pluginsBackend } from "./backend";
 
@@ -18,6 +19,13 @@ interface PluginsState {
   /** Locally available packages (Marketplace tab); `null` until loaded. */
   catalog: CatalogPlugin[] | null;
   catalogError: string | null;
+  /** Registry index URL (`plugins.registryUrl`); empty = no online repository. */
+  registryUrl: string;
+  /** Published packages; `null` until a registry is browsed. */
+  registry: RegistryPlugin[] | null;
+  registryError: string | null;
+  /** Download percent per plugin id being installed; `null` percent = unknown size. */
+  registryProgress: Readonly<Record<string, number | null>>;
 }
 
 export const usePlugins = create<PluginsState>(() => ({
@@ -30,6 +38,10 @@ export const usePlugins = create<PluginsState>(() => ({
   installing: false,
   catalog: null,
   catalogError: null,
+  registryUrl: "",
+  registry: null,
+  registryError: null,
+  registryProgress: {},
 }));
 
 export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -98,6 +110,106 @@ export async function refreshCatalog(): Promise<void> {
     usePlugins.setState({ catalog: await pluginsBackend().catalog(), catalogError: null });
   } catch (e) {
     usePlugins.setState({ catalog: [], catalogError: errorText(e) });
+  }
+}
+
+/** Reads `plugins.registryUrl` into the store; the URL it returns. */
+export async function loadRegistryUrl(): Promise<string> {
+  try {
+    const settings = await commands.settingsGet();
+    const url = settings.plugins?.registryUrl ?? "";
+    usePlugins.setState({ registryUrl: url });
+    return url;
+  } catch {
+    return "";
+  }
+}
+
+/** Stores the registry URL globally and browses it; empty turns the repository off. */
+export async function saveRegistryUrl(url: string): Promise<void> {
+  const trimmed = url.trim();
+  try {
+    await call(commands.settingsSet("global", "plugins.registryUrl", JSON.stringify(trimmed)));
+  } catch (e) {
+    notifications().notify({
+      group: "plugins",
+      level: "error",
+      title: "Could not save the repository URL",
+      body: errorText(e),
+    });
+    return;
+  }
+  usePlugins.setState({ registryUrl: trimmed });
+  await refreshRegistry(trimmed);
+}
+
+export async function refreshRegistry(url = usePlugins.getState().registryUrl): Promise<void> {
+  if (!url.trim()) {
+    usePlugins.setState({ registry: null, registryError: null });
+    return;
+  }
+  try {
+    usePlugins.setState({ registry: await pluginsBackend().registryIndex(url), registryError: null });
+  } catch (e) {
+    usePlugins.setState({ registry: [], registryError: errorText(e) });
+  }
+}
+
+/** What the Available tab offers for a published package given what is installed. */
+export function registryState(
+  entry: RegistryPlugin,
+  installed: readonly PluginInfo[],
+): "install" | "update" | "installed" {
+  const have = installed.find((p) => p.id === entry.id);
+  if (!have) return "install";
+  if (have.source === "dev") return "installed";
+  return compareVersions(entry.version, have.version) > 0 ? "update" : "installed";
+}
+
+/** Downloads and installs a published package; progress lands in `registryProgress`. */
+export async function installFromRegistry(id: string): Promise<string | null> {
+  const { registryUrl, registry } = usePlugins.getState();
+  const entry = registry?.find((p) => p.id === id);
+  if (!entry) return null;
+  usePlugins.setState((s) => ({ installing: true, registryProgress: { ...s.registryProgress, [id]: 0 } }));
+  try {
+    const info = await pluginsBackend().registryInstall(registryUrl, id, (p) => {
+      const percent =
+        p.type === "installing"
+          ? 100
+          : p.total && p.downloaded != null
+            ? Math.floor((p.downloaded / p.total) * 100)
+            : null;
+      usePlugins.setState((s) => ({ registryProgress: { ...s.registryProgress, [id]: percent } }));
+    });
+    notifications().notify({
+      group: "plugins",
+      level: info.status === "failed" ? "warning" : "info",
+      title: `Installed ${info.name} ${info.version}`,
+      body:
+        info.status === "failed"
+          ? (info.error ?? "The plugin failed to start.")
+          : entry.sha256
+            ? undefined
+            : "The registry published no checksum.",
+    });
+    await refreshRegistry();
+    return info.id;
+  } catch (e) {
+    notifications().notify({
+      group: "plugins",
+      level: "error",
+      title: `Could not install ${entry.name}`,
+      body: errorText(e),
+    });
+    return null;
+  } finally {
+    usePlugins.setState((s) => {
+      const progress = { ...s.registryProgress };
+      delete progress[id];
+      return { installing: false, registryProgress: progress };
+    });
+    await refreshPlugins();
   }
 }
 

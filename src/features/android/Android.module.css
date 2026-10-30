@@ -1,0 +1,240 @@
+.view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.toolbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.device {
+  min-width: 220px;
+}
+
+.level {
+  width: 72px;
+}
+
+.variant {
+  width: 92px;
+}
+
+.filter {
+  flex: 1;
+  min-width: 120px;
+  max-width: 360px;
+}
+
+.error {
+  flex: none;
+  padding: 2px 10px;
+  font-size: var(--fs-small);
+  color: var(--danger);
+  border-bottom: 1px solid var(--border);
+}
+
+.status {
+  flex: none;
+  padding: 2px 10px;
+  font-size: var(--fs-small);
+  color: var(--fg-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.deploy {
+  flex: none;
+  max-height: 160px;
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border);
+}
+
+.deployHeader {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 24px;
+  padding: 0 6px 0 10px;
+  font-size: var(--fs-small);
+  color: var(--fg-secondary);
+}
+
+.deployLog {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0 10px 4px;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+  color: var(--fg-secondary);
+  white-space: pre-wrap;
+}
+
+.log {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 104px 16px minmax(72px, 160px) minmax(0, 1fr);
+  gap: 8px;
+  height: 20px;
+  line-height: 20px;
+  padding: 0 10px;
+  white-space: pre;
+}
+
+.row:hover {
+  background: var(--bg-hover);
+}
+
+.time {
+  color: var(--fg-muted);
+  overflow: hidden;
+}
+
+.levelBadge {
+  text-align: center;
+  font-weight: 600;
+}
+
+.lV,
+.lD {
+  color: var(--fg-muted);
+}
+
+.lI {
+  color: var(--fg-emphasis);
+}
+
+.lW {
+  color: var(--warning);
+}
+
+.lE,
+.lF,
+.lA {
+  color: var(--danger);
+}
+
+.tag {
+  color: var(--fg-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.message {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Device File Explorer */
+
+.path {
+  flex: 1;
+  min-width: 160px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-small);
+}
+
+.roots {
+  width: 150px;
+}
+
+.crumbs {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-small);
+  font-family: var(--font-mono);
+  overflow: hidden;
+}
+
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--fg-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.crumb:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.crumbSep {
+  color: var(--fg-muted);
+}
+
+.fileList {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  font-size: var(--fs-small);
+}
+
+.fileRow {
+  display: grid;
+  grid-template-columns: 24px minmax(120px, 1fr) 72px 116px minmax(80px, 140px) 24px;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  padding: 0 10px;
+}
+
+.fileRow:hover {
+  background: var(--bg-hover);
+}
+
+.fileName {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--fg);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.fileName:disabled {
+  color: var(--fg);
+  cursor: default;
+}
+
+.fileSize,
+.fileWhen,
+.fileOwner {
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileSize {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}

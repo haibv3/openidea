@@ -12,6 +12,7 @@ something to show.
 | `python-app/`    | Python 3.10+, pytest                                            | `python -m tasks.cli` (from `src/`) | `pytest`             | `OPENIDEA_FAIL=1 pytest`                  | unused imports in `models.py`                            |
 | `go-app/`        | Go 1.22+                                                        | `go run ./cmd/server`               | `go test ./...`      | `OPENIDEA_FAIL=1 go test ./...`           | unused `fmt.Sprintf` result in `internal/store/store.go` |
 | `kotlin-gradle/` | JDK 21, Gradle 8 (no wrapper)                                   | `gradle run`                        | `gradle test`        | `gradle test -PopenideaFail`              | unused variable in `App.kt`                              |
+| `android-app/`   | none — preview files only (no SDK needed)                       | —                                   | —                    | —                                         | —                                                        |
 | `polyglot/`      | Go, TS, Python, C, shell, SQL, TOML/YAML/JSON, proto, Terraform | `make`                              | `make test`          | —                                     | unused variable in `native/hash.c`                       |
 
 The fixtures are standalone: `rust-app` declares its own `[workspace]` and
@@ -119,3 +120,19 @@ language detection and highlighting.
 - [ ] Language Servers lists each tool with languages, status (Installed / On PATH /
       Missing) and version; Install streams progress and can be cancelled;
       Uninstall removes managed tools. Nothing downloads without clicking Install.
+
+### Plugin previews (android-app fixture)
+
+- [ ] `preview-demo.demo` shows a preview pane with no setup: the bundled
+      `preview-fixture` dev plugin (Settings › Plugins lists it with a _dev_ tag)
+      echoes the text; editing the file updates the preview within ~0.5 s.
+- [ ] Installing `plugins/android-preview` (Install Plugin from Disk…) succeeds.
+- [ ] Opening `app/src/main/res/layout/activity_main.xml` shows the preview
+      toolbar (Editor / Editor and Preview / Preview); the default is split, like
+      Android Studio; layouts render inside a device frame with `@string/…`,
+      `@color/…` resolved and `tools:` overrides applied.
+- [ ] `list_item_note.xml` (RelativeLayout) and `profile_card.xml`
+      (ConstraintLayout) position their views as described by their constraints.
+- [ ] Opening `MainActivity.kt` shows one Compose frame per `@Preview` function.
+- [ ] Breaking a layout tag shows a readable error in the pane; the plugin stays
+      enabled in Settings › Plugins and further edits keep re-rendering.

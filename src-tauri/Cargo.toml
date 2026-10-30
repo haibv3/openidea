@@ -64,6 +64,7 @@ ide-ssh.workspace = true
 ide-remote.workspace = true
 ide-host.workspace = true
 ide-notebook.workspace = true
+ide-android.workspace = true
 ide-jsonrpc.workspace = true
 ide-tools = { path = "../crates/ide-tools" }
 ide-plugin = { path = "../crates/ide-plugin" }

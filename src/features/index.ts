@@ -42,6 +42,7 @@ import { activate as agents, activateSettingsPages as agentsPages } from "./agen
 import { activate as vim, activateSettingsPages as vimPages } from "./vim";
 import { activate as ssh } from "./ssh";
 import { activate as remoteDev } from "./remote-dev";
+import { activate as android } from "./android";
 
 type Activate = () => void | (() => void);
 
@@ -84,6 +85,7 @@ const features: Array<[string, Activate]> = [
   ["vim", vim],
   ["ssh", ssh],
   ["remote-dev", remoteDev],
+  ["android", android],
 ];
 
 export function activateFeatures(): () => void {

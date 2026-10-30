@@ -1,10 +1,27 @@
-/// OpenIDEA plugin API, version 0.1.
+/// OpenIDEA plugin API, version 0.3.
 ///
 /// A plugin is a WebAssembly component targeting the `plugin` world. It runs
 /// sandboxed: no filesystem, network, environment or clock access beyond what
 /// WASI preview 2 grants by default (wall/monotonic clocks and random only).
 /// Everything else goes through the `host` interface and is gated by the
 /// permissions declared in `plugin.toml`.
+///
+/// The package stays at 0.1.0 on purpose: a component matches the interface it
+/// imports by its versioned name, so keeping `openidea:plugin@0.1.0` lets every
+/// plugin built so far load unchanged. New host functions are therefore added
+/// in place — a guest only references the ones it calls — and the API level a
+/// plugin targets is declared in `plugin.toml` (`openidea-api = "0.3"`), which
+/// the host checks against its own level (see `manifest::API_VERSION`).
+///
+/// Guest exports are resolved when the host instantiates the world, so the
+/// `plugin` world's export list is frozen at `activate` / `deactivate` /
+/// `run-command` for compatibility. Optional capabilities live in their own
+/// world a component may additionally implement: `plugin-preview` declares the
+/// `render-preview` export. The host never instantiates against that world —
+/// it probes the component for the export by name and simply offers no
+/// preview for plugins that don't have it. A preview plugin generates its
+/// bindings from `world: "plugin-preview"`, a superset of `plugin`, so its
+/// component satisfies both.
 package openidea:plugin@0.1.0;
 
 interface types {
@@ -31,10 +48,80 @@ interface types {
         /// Permissions granted from the manifest, e.g. ["project-read"].
         permissions: list<string>,
     }
+
+    /// One entry of `list-dir`.
+    record dir-entry {
+        name: string,
+        is-dir: bool,
+        /// File size in bytes; 0 for directories.
+        size: u64,
+    }
+
+    /// What `run-process` should execute. Arguments are passed as argv: the
+    /// host never runs a shell, so `|`, `;` and globbing have no special mean.
+    record process-request {
+        /// Executable: a bare name looked up on the IDE's search path, or a
+        /// path inside the project (with a separator).
+        program: string,
+        args: list<string>,
+        /// Working directory relative to the project root; none = the root.
+        cwd: option<string>,
+        /// Hard limit in milliseconds (default 20000, max 60000).
+        timeout-ms: option<u32>,
+    }
+
+    record process-result {
+        /// -1 when the process could not be waited for (killed / timed out).
+        exit-code: s32,
+        stdout: string,
+        stderr: string,
+        /// The run outlived its timeout and was killed.
+        timed-out: bool,
+    }
+
+    record http-request {
+        url: string,
+        /// `GET` (default), `POST`, `PUT`, `PATCH`, `DELETE` or `HEAD`.
+        method: option<string>,
+        headers: list<tuple<string, string>>,
+        body: option<string>,
+    }
+
+    record http-response {
+        status: u16,
+        /// Body decoded as UTF-8 text; binary responses come back empty and
+        /// report their content type.
+        body: string,
+        content-type: option<string>,
+    }
+
+    /// Input of `render-preview`.
+    record preview-request {
+        /// Absolute path of the file being previewed.
+        path: string,
+        /// The same path relative to the project root, with `/` separators.
+        project-path: string,
+        /// `id` of the `[[contributes.previews]]` entry that matched the file.
+        decl: string,
+        /// Current editor content, unsaved edits included.
+        content: string,
+    }
+
+    /// What a preview renders.
+    record preview-output {
+        /// A self-contained HTML document (inline CSS/JS, no external assets)
+        /// shown in a sandboxed iframe (`allow-scripts` only, opaque origin).
+        html: string,
+        /// Suggested page background as `#rgb`, `#rrggbb` or `#rrggbbaa`;
+        /// the IDE default when absent.
+        background: option<string>,
+    }
 }
 
 interface host {
-    use types.{log-level, notification-level};
+    use types.{
+        log-level, notification-level, dir-entry, http-request, http-response, process-request, process-result,
+    };
 
     /// Writes to the IDE log (tagged with the plugin id).
     log: func(level: log-level, message: string);
@@ -69,6 +156,41 @@ interface host {
 
     /// Registers a theme from JSON: {"id","name","kind":"dark"|"light","tokens":{"--var":"value"}}.
     register-theme: func(definition: string) -> result<_, string>;
+
+    /// Lists a directory inside the project root (at most 2000 entries, sorted).
+    /// Requires `project-read`.
+    list-dir: func(path: string) -> result<list<dir-entry>, string>;
+
+    /// Writes (or creates) a UTF-8 file inside the project root; the parent
+    /// directory must exist. Requires `project-write`.
+    write-file: func(path: string, text: string) -> result<_, string>;
+
+    /// Creates a directory (with its parents) inside the project root.
+    /// Requires `project-write`.
+    create-dir: func(path: string) -> result<_, string>;
+
+    /// Deletes a file (never a directory) inside the project root.
+    /// Requires `project-write`.
+    delete-file: func(path: string) -> result<_, string>;
+
+    /// Runs a program with argv and returns its captured output. Requires
+    /// `process`; the program, its working directory and everything it writes
+    /// stay inside the project unless the program is a bare name on the search
+    /// path.
+    run-process: func(request: process-request) -> result<process-result, string>;
+
+    /// Fetches an https URL (plain http only for localhost in debug builds),
+    /// through the IDE's proxy settings. Requires `net`.
+    http-fetch: func(request: http-request) -> result<http-response, string>;
+
+    /// The effective value of the settings `key` (dotted path, e.g.
+    /// "appearance.theme") as JSON text; `ok none` when it is not set.
+    /// Requires `settings-read`.
+    settings-get: func(key: string) -> result<option<string>, string>;
+
+    /// Stores JSON text as the settings `key`, in the project layer when a
+    /// project is open and the global layer otherwise. Requires `settings-write`.
+    settings-set: func(key: string, json: string) -> result<_, string>;
 }
 
 world plugin {
@@ -81,4 +203,25 @@ world plugin {
     export deactivate: func();
     /// Runs one of the plugin's commands. Returns an optional message.
     export run-command: func(id: string, arg: option<string>) -> result<option<string>, string>;
+}
+
+/// Optional capability world for plugins that render file previews (see
+/// `contributes.previews` in `plugin.toml`). Implementing it is additive: the
+/// host looks the export up by name on components instantiated against the
+/// `plugin` world and skips preview support when it is absent.
+world plugin-preview {
+    use types.{context, preview-request, preview-output};
+    import host;
+
+    export activate: func(ctx: context) -> result<_, string>;
+    export deactivate: func();
+    export run-command: func(id: string, arg: option<string>) -> result<option<string>, string>;
+
+    /// Renders a live preview for a file whose path matched one of this
+    /// plugin's `contributes.previews` entries. The IDE calls it with the
+    /// editor's current text as the user types (debounced) and again on save.
+    /// Returning an error shows the message in the preview pane; the plugin
+    /// stays enabled. The call shares the per-call fuel and time budget with
+    /// every other host → plugin call, so keep rendering well under it.
+    export render-preview: func(request: preview-request) -> result<preview-output, string>;
 }

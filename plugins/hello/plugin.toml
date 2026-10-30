@@ -6,7 +6,7 @@ authors = ["OpenIDEA contributors"]
 change-notes = """
 0.1.0 — first release: Insert Date and Word Count of Active File commands.
 """
-openidea-api = "0.1"
+openidea-api = "0.2"
 wasm = "dist/plugin.wasm"
 permissions = ["project-read", "editor-read", "editor-write"]
 
@@ -21,3 +21,11 @@ category = "Hello"
 id = "word-count"
 title = "Hello: Word Count of Active File"
 category = "Hello"
+
+# A docked view showing a text file from this package. `command = "<id>"`
+# instead would show the text one of the plugin's commands returns.
+[[contributes.tool-windows]]
+id = "about"
+title = "Hello Notes"
+content = "docs/about.md"
+anchor = "bottom"

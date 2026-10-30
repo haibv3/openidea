@@ -1,0 +1,76 @@
+/* Structure mirrors Markdown.module.css: editor pane, plugin preview pane, floating mode bar. */
+.split {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  position: relative;
+}
+.editor {
+  flex: 1 1 50%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.mode-preview .editor {
+  display: none;
+}
+.mode-split .editor {
+  border-right: 1px solid var(--border-editor-tabs, var(--border));
+}
+
+.modeBar {
+  position: absolute;
+  top: 6px;
+  right: 20px;
+  z-index: 5;
+  display: flex;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--border-popup);
+  border-radius: var(--radius-toolbar-button);
+  background: var(--bg-popup);
+  box-shadow: var(--shadow-popup);
+  opacity: 0.85;
+}
+.modeBar:hover,
+.modeBar:focus-within {
+  opacity: 1;
+}
+
+/* The preview pane hosts the plugin's sandboxed iframe (or a message while it cannot render). */
+.preview {
+  flex: 1 1 50%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: var(--bg-editor, var(--bg-app));
+}
+.frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: none;
+  outline: none;
+}
+.message {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+  padding: 16px 20px;
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body, 13px);
+  line-height: 1.5;
+}
+.messageTitle {
+  margin: 0 0 0.6em;
+  color: var(--fg-strong);
+  font-weight: 600;
+}
+.message :global(p) {
+  margin: 0 0 0.4em;
+  overflow-wrap: break-word;
+}

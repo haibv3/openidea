@@ -58,6 +58,16 @@ pub struct Settings {
     pub deployment: DeploymentSettings,
     /// Build, Execution, Deployment › Run Targets.
     pub run_targets: Vec<RunTarget>,
+    /// Settings › Plugins: the online package repository to browse.
+    pub plugins: PluginSettings,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PluginSettings {
+    /// Index URL of an online plugin repository (`https://…/index.json`);
+    /// empty = Settings › Plugins offers local packages only.
+    pub registry_url: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -154,6 +164,7 @@ impl Default for Settings {
             ssh: SshSettings::default(),
             deployment: DeploymentSettings::default(),
             run_targets: Vec::new(),
+            plugins: PluginSettings::default(),
         }
     }
 }

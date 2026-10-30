@@ -36,6 +36,7 @@ ide-remote.workspace = true
 ide-jsonrpc.workspace = true
 ide-agent.workspace = true
 ide-notebook.workspace = true
+ide-android.workspace = true
 ide-tools = { path = "../ide-tools" }
 serde.workspace = true
 serde_json.workspace = true

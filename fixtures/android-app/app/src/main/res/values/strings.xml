@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OpenIDEA Notes</string>
+    <string name="welcome_message">Welcome back — your notes are ready.</string>
+    <string name="hero_description">Illustration of the day</string>
+    <string name="continue_label">Continue</string>
+    <string name="cancel_label">Cancel</string>
+    <string name="profile_name">Linh Tran</string>
+    <string name="profile_status">Working on the preview plugin</string>
+    <string name="follow_label">Follow</string>
+    <string name="note_sample_title">Sketch the layout preview toolbar</string>
+</resources>

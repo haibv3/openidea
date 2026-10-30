@@ -200,8 +200,11 @@ mod tests {
     #[test]
     fn project_and_user_skills_and_commands() {
         let tmp = tempfile::tempdir().unwrap();
+        // The project lives under the (fake) home: the upward walk stops there,
+        // so whatever the machine running the test has in its own `~/.claude`
+        // cannot leak into the list.
         let home = tmp.path().join("home");
-        let repo = tmp.path().join("work").join("idea");
+        let repo = home.join("work").join("idea");
         let skills = repo.join(".claude/skills");
         write(
             &skills.join("triage/SKILL.md"),
@@ -215,7 +218,7 @@ mod tests {
         write(&repo.join(".claude/commands/review.md"), "---\nargument-hint: <pr>\n---\nReview a pull request\n");
         write(&repo.join(".claude/commands/git/commit.md"), "# Commit the staged changes\n");
         // A parent directory's commands apply too.
-        write(&tmp.path().join("work/.claude/commands/parent.md"), "---\ndescription: from above\n---\n");
+        write(&home.join("work/.claude/commands/parent.md"), "---\ndescription: from above\n---\n");
         // The user's: shadowed by the project's skill of the same name.
         write(&home.join(".claude/skills/triage/SKILL.md"), "---\nname: triage\ndescription: user triage\n---\n");
         write(&home.join(".claude/skills/lint/SKILL.md"), "---\nname: lint\ndescription: user lint\n---\n");

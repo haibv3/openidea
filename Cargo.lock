@@ -4073,6 +4073,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ide-android"
+version = "0.1.26"
+dependencies = [
+ "ide-core",
+ "libc",
+ "serde",
+ "specta",
+ "tempfile",
+]
+
+[[package]]
 name = "ide-build"
 version = "0.1.26"
 dependencies = [
@@ -4213,6 +4224,7 @@ dependencies = [
  "encoding_rs",
  "ide-agent",
  "ide-analysis",
+ "ide-android",
  "ide-build",
  "ide-core",
  "ide-coverage",
@@ -4415,6 +4427,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "specta",
  "tempfile",
  "thiserror 2.0.21",
@@ -4422,6 +4435,7 @@ dependencies = [
  "tracing",
  "wasmtime",
  "wasmtime-wasi",
+ "zip",
 ]
 
 [[package]]
@@ -6143,6 +6157,7 @@ dependencies = [
  "dunce",
  "ide-agent",
  "ide-analysis",
+ "ide-android",
  "ide-build",
  "ide-clipboard",
  "ide-core",
