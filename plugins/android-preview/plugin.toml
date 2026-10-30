@@ -17,7 +17,7 @@ permissions = ["project-read"]
 id = "layout-xml"
 title = "Android Layout Preview"
 extensions = ["xml"]
-path-globs = ["**/res/layout/**"]
+path-globs = ["**/res/layout*/**"]
 
 [[contributes.previews]]
 id = "compose"

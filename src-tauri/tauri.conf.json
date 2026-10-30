@@ -37,6 +37,10 @@
     "active": true,
     "targets": "all",
     "createUpdaterArtifacts": true,
+    "resources": {
+      "../plugins/android-preview/plugin.toml": "plugins/android-preview/plugin.toml",
+      "../plugins/android-preview/dist/plugin.wasm": "plugins/android-preview/dist/plugin.wasm"
+    },
     "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"],
     "category": "DeveloperTool",
     "copyright": "Copyright © 2026 OpenIDEA contributors",

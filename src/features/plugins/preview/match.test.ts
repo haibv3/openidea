@@ -38,6 +38,9 @@ describe("pathMatchesGlob", () => {
     ["**/res/layout/**", "res/layoutx/main.xml", false],
     ["**/res/layout/**", "main.xml", false],
     ["**/res/layout/**", "app/src/main/res/layout", false],
+    ["**/res/layout*/**", "app/src/main/res/layout-land/main.xml", true],
+    ["**/res/layout*/**", "app/src/main/res/layout/main.xml", true],
+    ["**/res/layout*/**", "app/src/main/res/values/strings.xml", false],
     ["src/*.ts", "src/a.ts", true],
     ["src/*.ts", "src/sub/a.ts", false], // * stays within one segment
     ["src/*.ts", "src/a.tsx", false],
