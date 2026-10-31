@@ -145,6 +145,11 @@ interface host {
     /// to the root). Paths escaping the root are rejected. Requires `project-read`.
     read-file: func(path: string) -> result<string, string>;
 
+    /// Reads any file inside the project root as raw bytes (absolute, or
+    /// relative to the root). Paths escaping the root are rejected; the same
+    /// size cap as `read-file` applies. Requires `project-read`.
+    read-file-bytes: func(path: string) -> result<list<u8>, string>;
+
     /// Inserts text at the cursor of the active editor. Requires `editor-write`.
     insert-text: func(text: string);
 

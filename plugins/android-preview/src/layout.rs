@@ -8,9 +8,40 @@
 //! Pure Rust, no host calls: fully unit-testable natively.
 
 use std::collections::HashMap;
+use std::rc::Rc;
+
+use crate::resources::ResDrawable;
 
 use crate::resources::{Resources, ShapeDrawable};
 use crate::xml::{self, Element};
+
+/// Resource tables plus the theme active at the current tree position.
+/// `android:theme` on a view swaps the theme for that view and its children.
+#[derive(Clone)]
+pub struct Ctx<'a> {
+    pub res: &'a Resources<'a>,
+    /// `(attr name, value)` items of the active `android:theme` style chain.
+    pub theme: Rc<Vec<(String, String)>>,
+}
+
+impl<'a> Ctx<'a> {
+    fn color(&self, raw: &str) -> Option<String> {
+        self.res.color_in_theme(raw, &self.theme, 0)
+    }
+
+    /// Same context under a different theme.
+    fn with_theme(&self, theme_ref: &str) -> Ctx<'a> {
+        Ctx { res: self.res, theme: Rc::new(self.res.theme_attrs(theme_ref)) }
+    }
+}
+
+/// How a drawable renders on a view: inline SVG (`<vector>`) or a `data:` URI
+/// (bitmap, or a URL-encoded SVG where CSS `url()` is needed).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Image {
+    Svg(String),
+    Uri(String),
+}
 
 /// Preview device viewport (dp → px 1:1).
 pub const DEVICE_W: f32 = 411.0;
@@ -178,6 +209,16 @@ pub struct Style {
     pub shape: Option<ShapeDrawable>,
     /// Unresolved `@drawable` name shown as a labelled block.
     pub drawable: Option<String>,
+    /// `android:src`: inline vector SVG or a bitmap/SVG `data:` URI.
+    pub src_image: Option<Image>,
+    /// `android:background` when it is a drawable.
+    pub bg_image: Option<Image>,
+    /// `app:icon` (Material/custom buttons).
+    pub icon: Option<Image>,
+    /// `android:clipChildren` — XML views clip by default, Compose doesn't.
+    pub clip_children: Option<bool>,
+    /// `RecyclerView`/`ListView`/`GridView` sample item count (tools:itemCount).
+    pub item_count: Option<u32>,
     pub fg: Option<String>,
     pub tint: Option<String>,
     pub font_size: Option<f32>,
@@ -244,15 +285,19 @@ pub fn build(content: &str, res: &Resources) -> Result<Vec<Node>, String> {
     let Some(root) = doc.root else {
         return Err("no root element".into());
     };
+    // `?attr/…` resolves against the theme of the root (or the default when
+    // the layout declares none) — the same chain Android Studio applies.
+    let theme = root.attr("android:theme").map(|t| res.theme_attrs(t)).unwrap_or_default();
+    let ctx = Ctx { res, theme: Rc::new(theme) };
     let mut stack = Vec::new();
     if root.name_local() == "merge" {
         let mut out = Vec::new();
         for child in root.elements() {
-            out.extend(build_element(child, res, 0, &mut stack));
+            out.extend(build_element(child, &ctx, 0, &mut stack));
         }
         return Ok(out);
     }
-    Ok(build_element(&root, res, 0, &mut stack))
+    Ok(build_element(&root, &ctx, 0, &mut stack))
 }
 
 fn id_ref(raw: &str) -> String {
@@ -263,7 +308,8 @@ fn id_ref(raw: &str) -> String {
 /// `AppCompatButton`, `MaterialButton`, `MaterialCardView`, `SwitchCompat`…
 /// preview like their base widget instead of an empty box.
 fn canonical_kind(tag: &str) -> String {
-    let kind = match tag {
+    let simple = tag.rsplit([':', '.']).next().unwrap_or(tag);
+    let kind = match simple {
         "AppCompatButton" | "MaterialButton" | "ButtonCompat" => "Button",
         "AppCompatTextView" | "MaterialTextView" => "TextView",
         "AppCompatImageView" | "ShapeableImageView" => "ImageView",
@@ -281,48 +327,137 @@ fn canonical_kind(tag: &str) -> String {
         "LinearProgressIndicator" => "ProgressBar",
         "CircularProgressIndicator" => "ProgressBar",
         "MaterialSeekBar" => "SeekBar",
+        "Space" => "Space",
+        // Every built-in kind stays itself even under a qualified name
+        // (`androidx.constraintlayout.widget.ConstraintLayout`).
+        "LinearLayout"
+        | "ConstraintLayout"
+        | "FrameLayout"
+        | "RelativeLayout"
+        | "GridLayout"
+        | "CoordinatorLayout"
+        | "ScrollView"
+        | "HorizontalScrollView"
+        | "NestedScrollView"
+        | "CardView"
+        | "TabLayout"
+        | "ViewPager"
+        | "ViewPager2"
+        | "RecyclerView"
+        | "ListView"
+        | "GridView"
+        | "TextView"
+        | "EditText"
+        | "ImageView"
+        | "ImageButton"
+        | "Button"
+        | "RadioButton"
+        | "CheckBox"
+        | "Switch"
+        | "SeekBar"
+        | "ProgressBar"
+        | "Spinner"
+        | "WebView"
+        | "Space"
+        | "View"
+        | "Guideline"
+        | "Divider"
+        | "Toolbar"
+        | "FloatingActionButton"
+        | "VideoView"
+        | "Surface"
+        | "Box"
+        | "Column"
+        | "Row"
+        | "LazyColumn"
+        | "LazyRow"
+        | "OutlinedButton"
+        | "TextButton"
+        | "ElevatedButton"
+        | "FilledTonalButton"
+        | "IconButton"
+        | "Icon"
+        | "Chip" => simple,
+        // Anything custom (a dotted class name) maps by suffix:
+        // `com.vinfast.…OneUIButton` previews like a Button, `…ImageView` like
+        // an ImageView. Unqualified tags pass through unchanged.
+        other if tag.contains('.') || tag.contains(':') => return suffix_kind(other),
         other => other,
     };
     kind.to_owned()
 }
 
+/// Custom view classes (`com.foo.BarButton`) → the closest built-in kind.
+fn suffix_kind(simple: &str) -> String {
+    // Order matters: `RadioButton`/`ImageButton`/`CheckBox` before `Button`.
+    const RULES: [(&str, &str); 21] = [
+        ("ImageButton", "ImageButton"),
+        ("RadioButton", "RadioButton"),
+        ("CheckBox", "CheckBox"),
+        ("Button", "Button"),
+        ("EditText", "EditText"),
+        ("AutoCompleteTextView", "EditText"),
+        ("TextView", "TextView"),
+        ("ImageView", "ImageView"),
+        ("RecyclerView", "RecyclerView"),
+        ("ListView", "ListView"),
+        ("GridView", "GridView"),
+        ("ScrollView", "ScrollView"),
+        ("SwitchCompat", "Switch"),
+        ("Switch", "Switch"),
+        ("SeekBar", "SeekBar"),
+        ("ProgressBar", "ProgressBar"),
+        ("Spinner", "Spinner"),
+        ("CardView", "CardView"),
+        ("Toolbar", "Toolbar"),
+        ("FloatingActionButton", "FloatingActionButton"),
+        ("Chip", "Chip"),
+    ];
+    for (suffix, kind) in RULES {
+        if simple != suffix && simple.ends_with(suffix) {
+            return kind.to_owned();
+        }
+    }
+    "View".to_owned()
+}
+
 /// Builds one element into zero or more nodes (`include` of a `<merge>` can
 /// produce several).
-fn build_element(el: &Element, res: &Resources, depth: usize, stack: &mut Vec<String>) -> Vec<Node> {
+fn build_element(el: &Element, ctx: &Ctx, depth: usize, stack: &mut Vec<String>) -> Vec<Node> {
     if depth > 24 {
         return Vec::new(); // runaway nesting guard
     }
     match el.name_local() {
-        "include" => build_include(el, res, depth, stack),
+        "include" => build_include(el, ctx, depth, stack),
         "requestFocus" => Vec::new(),
-        _ => vec![build_view(el, res, depth, stack)],
+        _ => vec![build_view(el, ctx, depth, stack)],
     }
 }
 
-fn build_include(el: &Element, res: &Resources, depth: usize, stack: &mut Vec<String>) -> Vec<Node> {
+fn build_include(el: &Element, ctx: &Ctx, depth: usize, stack: &mut Vec<String>) -> Vec<Node> {
     let Some(layout_attr) = el.attr("layout") else { return Vec::new() };
     let name = layout_attr.trim().trim_start_matches("@layout/").to_owned();
     let expansion = if depth + 1 > 8 || stack.iter().any(|s| *s == name) {
         // Cycle or too deep: degrade to a labelled placeholder.
         let mut n = Node::placeholder(format!("<include {name}> (not expanded)"));
-        apply_common(el, &mut n, res);
-        apply_tools(el, &mut n, res);
+        apply_common(el, &mut n, ctx);
+        apply_tools(el, &mut n, ctx);
         vec![n]
     } else {
-        match res.layout_xml(&name).and_then(|t| xml::parse(&t).ok().and_then(|d| d.root)) {
+        match ctx.res.layout_xml(&name).and_then(|t| xml::parse(&t).ok().and_then(|d| d.root)) {
             Some(root) => {
                 stack.push(name);
                 let mut out = Vec::new();
                 if root.name_local() == "merge" {
                     for child in root.elements() {
-                        for mut node in build_element(child, res, depth + 1, stack) {
-                            apply_include_overrides(el, &mut node, res);
+                        for mut node in build_element(child, ctx, depth + 1, stack) {
+                            apply_include_overrides(el, &mut node, ctx);
                             out.push(node);
                         }
                     }
                 } else {
-                    for mut node in build_element(&root, res, depth + 1, stack) {
-                        apply_include_overrides(el, &mut node, res);
+                    for mut node in build_element(&root, ctx, depth + 1, stack) {
+                        apply_include_overrides(el, &mut node, ctx);
                         out.push(node);
                     }
                 }
@@ -331,8 +466,8 @@ fn build_include(el: &Element, res: &Resources, depth: usize, stack: &mut Vec<St
             }
             None => {
                 let mut n = Node::placeholder(format!("<include {name}> (not found)"));
-                apply_common(el, &mut n, res);
-                apply_tools(el, &mut n, res);
+                apply_common(el, &mut n, ctx);
+                apply_tools(el, &mut n, ctx);
                 vec![n]
             }
         }
@@ -342,37 +477,66 @@ fn build_include(el: &Element, res: &Resources, depth: usize, stack: &mut Vec<St
 
 /// The `<include>` element's `android:layout_*`, `android:id`,
 /// `android:visibility` and `tools:*` attributes override the included root's.
-fn apply_include_overrides(el: &Element, node: &mut Node, res: &Resources) {
+fn apply_include_overrides(el: &Element, node: &mut Node, ctx: &Ctx) {
     for (name, value) in &el.attrs {
         if name == "layout" {
             continue;
         }
         if let Some(rest) = name.strip_prefix("android:") {
             if rest.starts_with("layout_") || rest == "id" || rest == "visibility" {
-                apply_android_attr(node, rest, value, res);
+                apply_android_attr(node, rest, value, ctx);
             }
         } else if let Some(local) = name.strip_prefix("tools:") {
-            apply_tool(node, local, value, res);
+            apply_tool(node, local, value, ctx);
         }
     }
 }
 
-fn build_view(el: &Element, res: &Resources, depth: usize, stack: &mut Vec<String>) -> Node {
-    let mut node = Node { kind: canonical_kind(el.tag_local()), ..Default::default() };
+fn build_view(el: &Element, ctx: &Ctx, depth: usize, stack: &mut Vec<String>) -> Node {
+    // `android:theme` re-themes this view and everything below it.
+    let child_ctx_storage;
+    let ctx = match el.attr("android:theme") {
+        Some(t) => {
+            child_ctx_storage = ctx.with_theme(t);
+            &child_ctx_storage
+        }
+        None => ctx,
+    };
+    let tag = el.name_local();
+    let mut node = Node { kind: canonical_kind(tag), ..Default::default() };
+    // A custom class with no matching widget shows its name, like AS does.
+    if node.kind == "View" && tag.contains('.') {
+        node.sub = Some(tag.rsplit('.').next().unwrap_or(tag).to_owned());
+    }
+    // XML views clip children unless told otherwise.
+    node.style.clip_children = Some(true);
     if let Some(id) = el.attr("android:id") {
         node.id = Some(id_ref(id));
     }
     // `style="@style/X"` provides the base layer; element attributes win.
     if let Some(style_ref) = el.attr("style") {
-        for (name, value) in res.style_attrs(style_ref) {
+        for (name, value) in ctx.res.style_attrs(style_ref) {
             if let Some(local) = name.strip_prefix("android:") {
-                apply_android_attr(&mut node, local, &value, res);
+                apply_android_attr(&mut node, local, &value, ctx);
             }
         }
     }
-    apply_common(el, &mut node, res);
-    apply_kind_attrs(el, &mut node, res);
-    apply_tools(el, &mut node, res);
+    apply_common(el, &mut node, ctx);
+    apply_kind_attrs(el, &mut node, ctx);
+    apply_tools(el, &mut node, ctx);
+    // `tools:listitem`/`tools:itemCount`: preview a RecyclerView/ListView/
+    // GridView with sample rows of the item layout, like Android Studio.
+    if node.children.is_empty() && matches!(node.kind.as_str(), "RecyclerView" | "ListView" | "GridView") {
+        if let Some(item_layout) = el.attr("tools:listitem") {
+            let name = item_layout.trim().trim_start_matches("@layout/");
+            if let Some(item_root) = ctx.res.layout_xml(name).and_then(|t| xml::parse(&t).ok().and_then(|d| d.root)) {
+                let count = node.style.item_count.unwrap_or(5).clamp(1, 12);
+                for _ in 0..count {
+                    node.children.extend(build_element(&item_root, ctx, depth + 1, stack));
+                }
+            }
+        }
+    }
     // Defaults Android applies itself.
     match node.kind.as_str() {
         "LinearLayout" if node.style.flex_dir.is_none() => node.style.flex_dir = Some(FlexDir::Row),
@@ -381,7 +545,7 @@ fn build_view(el: &Element, res: &Resources, depth: usize, stack: &mut Vec<Strin
         _ => {}
     }
     for child in el.elements() {
-        node.children.extend(build_element(child, res, depth + 1, stack));
+        node.children.extend(build_element(child, ctx, depth + 1, stack));
     }
     node
 }
@@ -389,7 +553,7 @@ fn build_view(el: &Element, res: &Resources, depth: usize, stack: &mut Vec<Strin
 /// Applies the generic android:* attributes every view shares; unknown ones
 /// are silently ignored. Shorthand `layout_margin` / `padding` are applied
 /// before the per-edge variants so document order never matters.
-fn apply_common(el: &Element, node: &mut Node, res: &Resources) {
+fn apply_common(el: &Element, node: &mut Node, ctx: &Ctx) {
     const SHORTHANDS: [&str; 2] = ["layout_margin", "padding"];
     for pass in 0..2 {
         for (name, value) in &el.attrs {
@@ -397,42 +561,43 @@ fn apply_common(el: &Element, node: &mut Node, res: &Resources) {
                 Some(("android", local)) => {
                     let shorthand = SHORTHANDS.contains(&local);
                     if (pass == 0) == shorthand {
-                        apply_android_attr(node, local, value, res);
+                        apply_android_attr(node, local, value, ctx);
                     }
                 }
-                Some(("app", local)) if pass == 0 => apply_app_attr(node, local, value, res),
+                Some(("app", local)) if pass == 0 => apply_app_attr(node, local, value, ctx),
                 _ => {} // xmlns:*, tools:* (later), unknown namespaces
             }
         }
     }
 }
 
-fn apply_android_attr(node: &mut Node, name: &str, value: &str, res: &Resources) {
+fn apply_android_attr(node: &mut Node, name: &str, value: &str, ctx: &Ctx) {
     let s = &mut node.style;
     match name {
-        "layout_width" => s.width = parse_size(value, res),
-        "layout_height" => s.height = parse_size(value, res),
+        "layout_width" => s.width = parse_size(value, ctx),
+        "layout_height" => s.height = parse_size(value, ctx),
         "layout_margin" => {
-            let m = d(value, res);
+            let m = d(value, ctx);
             s.margin = Edges { start: m, end: m, top: m, bottom: m };
         }
-        "layout_marginLeft" | "layout_marginStart" => s.margin.start = d(value, res),
-        "layout_marginRight" | "layout_marginEnd" => s.margin.end = d(value, res),
-        "layout_marginTop" => s.margin.top = d(value, res),
-        "layout_marginBottom" => s.margin.bottom = d(value, res),
+        "layout_marginLeft" | "layout_marginStart" => s.margin.start = d(value, ctx),
+        "layout_marginRight" | "layout_marginEnd" => s.margin.end = d(value, ctx),
+        "layout_marginTop" => s.margin.top = d(value, ctx),
+        "layout_marginBottom" => s.margin.bottom = d(value, ctx),
         "padding" => {
-            let p = d(value, res);
+            let p = d(value, ctx);
             s.padding = Edges { start: p, end: p, top: p, bottom: p };
         }
-        "paddingLeft" | "paddingStart" => s.padding.start = d(value, res),
-        "paddingRight" | "paddingEnd" => s.padding.end = d(value, res),
-        "paddingTop" => s.padding.top = d(value, res),
-        "paddingBottom" => s.padding.bottom = d(value, res),
-        "background" => apply_background(node, value, res),
+        "paddingLeft" | "paddingStart" => s.padding.start = d(value, ctx),
+        "paddingRight" | "paddingEnd" => s.padding.end = d(value, ctx),
+        "paddingTop" => s.padding.top = d(value, ctx),
+        "paddingBottom" => s.padding.bottom = d(value, ctx),
+        "background" => apply_background(node, value, ctx),
         "alpha" => s.alpha = value.trim().parse().ok(),
-        "elevation" => s.elevation = Some(d(value, res)),
+        "elevation" => s.elevation = Some(d(value, ctx)),
         "rotation" => s.rotation = value.trim().parse().ok(),
         "visibility" => s.visibility = parse_visibility(value),
+        "clipChildren" => s.clip_children = Some(ctx.res.boolean(value).unwrap_or(true)),
         "layout_gravity" => s.layout_gravity = Some(parse_gravity(value)),
         "gravity" => s.gravity = Some(parse_gravity(value)),
         "layout_weight" => s.weight = value.trim().parse().ok(),
@@ -443,10 +608,10 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, res: &Resources)
                 _ => FlexDir::Column,
             })
         }
-        "text" => node.text = resolve_text(value, res),
-        "hint" => node.hint = resolve_text(value, res),
-        "textSize" => s.font_size = res.dimen(value, 0),
-        "textColor" => s.fg = res.color(value, 0),
+        "text" => node.text = resolve_text(value, ctx),
+        "hint" => node.hint = resolve_text(value, ctx),
+        "textSize" => s.font_size = ctx.res.dimen(value, 0),
+        "textColor" => s.fg = ctx.color(value),
         "textStyle" => {
             s.bold = Some(value.contains("bold"));
             s.italic = Some(value.contains("italic"));
@@ -458,16 +623,16 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, res: &Resources)
                 _ => "sans-serif",
             })
         }
-        "textAllCaps" => s.all_caps = res.boolean(value).unwrap_or(false),
+        "textAllCaps" => s.all_caps = ctx.res.boolean(value).unwrap_or(false),
         "maxLines" => s.max_lines = value.trim().parse().ok(),
         "ellipsize" => s.ellipsize = matches!(value.trim(), "end" | "marquee" | "middle" | "start"),
         "letterSpacing" => s.letter_spacing = value.trim().parse().ok(),
-        "lineSpacingExtra" => s.line_height = Some(s.font_size.unwrap_or(14.0) * 1.4 + d(value, res)),
+        "lineSpacingExtra" => s.line_height = Some(s.font_size.unwrap_or(14.0) * 1.4 + d(value, ctx)),
         "lineSpacingMultiplier" => {
             s.line_height = Some(s.font_size.unwrap_or(14.0) * 1.4 * value.trim().parse().unwrap_or(1.0))
         }
-        "src" => apply_src(node, value, res),
-        "tint" => s.tint = res.color(value, 0),
+        "src" => apply_src(node, value, ctx),
+        "tint" => s.tint = ctx.color(value),
         "scaleType" => {
             s.scale_type = Some(match value.trim() {
                 "fitXY" => "fill",
@@ -485,8 +650,8 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, res: &Resources)
                 s.spinner = false;
             }
         }
-        "indeterminate" => s.spinner = res.boolean(value).unwrap_or(true),
-        "checked" => s.checked = res.boolean(value),
+        "indeterminate" => s.spinner = ctx.res.boolean(value).unwrap_or(true),
+        "checked" => s.checked = ctx.res.boolean(value),
         // RelativeLayout rules
         "layout_below" => s.rel.below = Some(id_ref(value)),
         "layout_above" => s.rel.above = Some(id_ref(value)),
@@ -518,11 +683,11 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, res: &Resources)
         "layout_constraintWidth_percent" => s.con.width_percent = value.trim().parse().ok(),
         "layout_constraintHeight_percent" => s.con.height_percent = value.trim().parse().ok(),
         "layout_dimensionRatio" => s.con.ratio = parse_ratio(value),
-        "layout_constraintGuide_begin" => s.con.guide_begin = Some(d(value, res)),
-        "layout_constraintGuide_end" => s.con.guide_end = Some(d(value, res)),
+        "layout_constraintGuide_begin" => s.con.guide_begin = Some(d(value, ctx)),
+        "layout_constraintGuide_end" => s.con.guide_end = Some(d(value, ctx)),
         "layout_constraintGuide_percent" => s.con.guide_percent = value.trim().parse().ok(),
-        "layout_editor_absoluteX" => s.con.editor_x = Some(d(value, res)),
-        "layout_editor_absoluteY" => s.con.editor_y = Some(d(value, res)),
+        "layout_editor_absoluteX" => s.con.editor_x = Some(d(value, ctx)),
+        "layout_editor_absoluteY" => s.con.editor_y = Some(d(value, ctx)),
         // GridLayout
         "columnCount" => s.grid_cols = value.trim().parse().ok(),
         "rowCount" => {}
@@ -534,46 +699,52 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, res: &Resources)
     }
 }
 
-fn apply_app_attr(node: &mut Node, name: &str, value: &str, res: &Resources) {
+fn apply_app_attr(node: &mut Node, name: &str, value: &str, ctx: &Ctx) {
     // ConstraintLayout rules live in the `app:` namespace.
     if name.starts_with("layout_constraint") || name == "layout_dimensionRatio" || name.starts_with("layout_editor_") {
-        return apply_android_attr(node, name, value, res);
+        return apply_android_attr(node, name, value, ctx);
     }
     let s = &mut node.style;
     match name {
-        "cardCornerRadius" => s.radius = Some(d(value, res)),
-        "cardElevation" => s.elevation = Some(d(value, res)),
-        "cardBackgroundColor" => s.bg_color = res.color(value, 0),
+        "cardCornerRadius" => s.radius = Some(d(value, ctx)),
+        "cardElevation" => s.elevation = Some(d(value, ctx)),
+        "cardBackgroundColor" => s.bg_color = ctx.color(value),
+        "icon" => {
+            let _ = apply_image_attr(node, value, ctx, |n, i| n.style.icon = Some(i));
+        }
+        "iconTint" => s.tint = ctx.color(value),
         "contentPadding" => {
-            let p = d(value, res);
+            let p = d(value, ctx);
             s.padding = Edges { start: p, end: p, top: p, bottom: p };
         }
-        "contentPaddingLeft" => s.padding.start = d(value, res),
-        "contentPaddingRight" => s.padding.end = d(value, res),
-        "contentPaddingTop" => s.padding.top = d(value, res),
-        "contentPaddingBottom" => s.padding.bottom = d(value, res),
+        "contentPaddingLeft" => s.padding.start = d(value, ctx),
+        "contentPaddingRight" => s.padding.end = d(value, ctx),
+        "contentPaddingTop" => s.padding.top = d(value, ctx),
+        "contentPaddingBottom" => s.padding.bottom = d(value, ctx),
         _ => {} // other app:* namespaces ignored
     }
 }
 
 /// `tools:` attributes win over the runtime ones, exactly like Android Studio.
-fn apply_tools(el: &Element, node: &mut Node, res: &Resources) {
+fn apply_tools(el: &Element, node: &mut Node, ctx: &Ctx) {
     for (name, value) in &el.attrs {
         if let Some(local) = name.strip_prefix("tools:") {
-            apply_tool(node, local, value, res);
+            apply_tool(node, local, value, ctx);
         }
     }
 }
 
-fn apply_tool(node: &mut Node, local: &str, value: &str, res: &Resources) {
+fn apply_tool(node: &mut Node, local: &str, value: &str, ctx: &Ctx) {
     match local {
-        "text" => node.text = resolve_text(value, res),
-        "hint" => node.hint = resolve_text(value, res),
-        "src" => apply_src(node, value, res),
-        "background" => apply_background(node, value, res),
-        "textColor" => node.style.fg = res.color(value, 0),
+        "text" => node.text = resolve_text(value, ctx),
+        "hint" => node.hint = resolve_text(value, ctx),
+        "src" => apply_src(node, value, ctx),
+        "background" => apply_background(node, value, ctx),
+        "textColor" => node.style.fg = ctx.color(value),
         "visibility" => node.style.visibility = parse_visibility(value),
-        _ => {} // tools:ignore, tools:context, tools:targetApi, …
+        "itemCount" => node.style.item_count = value.trim().parse().ok(),
+        "listitem" => {} // consumed by build_view when inflating sample rows
+        _ => {}          // tools:ignore, tools:context, tools:targetApi, …
     }
 }
 
@@ -591,8 +762,8 @@ fn parse_ratio(value: &str) -> Option<(f32, f32)> {
     Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
-fn resolve_text(value: &str, res: &Resources) -> Option<String> {
-    Some(res.text(value, 0).unwrap_or_else(|| value.to_owned()))
+fn resolve_text(value: &str, ctx: &Ctx) -> Option<String> {
+    Some(ctx.res.text(value, 0).unwrap_or_else(|| value.to_owned()))
 }
 
 fn parse_visibility(value: &str) -> Visibility {
@@ -603,56 +774,84 @@ fn parse_visibility(value: &str) -> Visibility {
     }
 }
 
-fn parse_size(value: &str, res: &Resources) -> Option<Size> {
+fn parse_size(value: &str, ctx: &Ctx) -> Option<Size> {
     match value.trim() {
         "match_parent" | "fill_parent" => Some(Size::Match),
         "wrap_content" => Some(Size::Wrap),
-        _ => res.dimen(value, 0).map(Size::Px),
+        _ => ctx.res.dimen(value, 0).map(Size::Px),
     }
 }
 
-fn d(value: &str, res: &Resources) -> f32 {
-    res.dimen(value, 0).unwrap_or(0.0)
+fn d(value: &str, ctx: &Ctx) -> f32 {
+    ctx.res.dimen(value, 0).unwrap_or(0.0)
 }
 
-fn apply_background(node: &mut Node, value: &str, res: &Resources) {
+fn apply_background(node: &mut Node, value: &str, ctx: &Ctx) {
     let s = &mut node.style;
-    if let Some(color) = res.color(value, 0) {
+    if let Some(color) = ctx.color(value) {
         s.bg_color = Some(color);
         return;
     }
     if let Some(name) = value.strip_prefix("@drawable/").or_else(|| value.strip_prefix("@mipmap/")) {
-        if let Some(shape) = res.drawable_shape(name) {
-            s.shape = Some(shape);
-        } else {
-            s.drawable = Some(name.to_owned());
+        match ctx.res.drawable(name) {
+            Some(ResDrawable::Shape(shape)) => s.shape = Some(shape),
+            Some(ResDrawable::Svg(svg)) => s.bg_image = Some(Image::Uri(svg_data_uri(&svg))),
+            Some(ResDrawable::Image(uri)) => s.bg_image = Some(Image::Uri(uri)),
+            None => s.drawable = Some(name.to_owned()),
         }
     }
 }
 
-fn apply_src(node: &mut Node, value: &str, res: &Resources) {
-    if let Some(name) = value.strip_prefix("@drawable/").or_else(|| value.strip_prefix("@mipmap/")) {
-        match res.drawable_shape(name) {
-            Some(shape) => {
-                node.style.shape = Some(shape);
-                node.sub = None;
-            }
-            None => node.sub = Some(name.to_owned()),
+/// `<svg>…</svg>` → `data:image/svg+xml` for CSS `url()`/`background-image`.
+fn svg_data_uri(svg: &str) -> String {
+    let mut out = String::with_capacity(svg.len() + 32);
+    out.push_str("data:image/svg+xml,");
+    for c in svg.chars() {
+        match c {
+            '#' => out.push_str("%23"),
+            '<' => out.push_str("%3C"),
+            '>' => out.push_str("%3E"),
+            '"' => out.push_str("%22"),
+            '&' => out.push_str("%26"),
+            _ => out.push(c),
         }
+    }
+    out
+}
+
+/// `android:src` / `app:icon` shared drawable resolution.
+fn apply_image_attr(node: &mut Node, value: &str, ctx: &Ctx, set: impl Fn(&mut Node, Image)) -> bool {
+    let Some(name) = value.strip_prefix("@drawable/").or_else(|| value.strip_prefix("@mipmap/")) else {
+        return false;
+    };
+    match ctx.res.drawable(name) {
+        Some(ResDrawable::Shape(shape)) => {
+            node.style.shape = Some(shape);
+            node.sub = None;
+        }
+        Some(ResDrawable::Svg(svg)) => set(node, Image::Svg(svg)),
+        Some(ResDrawable::Image(uri)) => set(node, Image::Uri(uri)),
+        None => node.sub = Some(name.to_owned()),
+    }
+    true
+}
+
+fn apply_src(node: &mut Node, value: &str, ctx: &Ctx) {
+    if apply_image_attr(node, value, ctx, |n, i| n.style.src_image = Some(i)) {
         return;
     }
     // Text/URL sources: show as a labelled block or the literal.
-    node.sub = resolve_text(value, res);
+    node.sub = resolve_text(value, ctx);
 }
 
 /// Kind-specific handling that plain attribute application can't express.
-fn apply_kind_attrs(el: &Element, node: &mut Node, res: &Resources) {
+fn apply_kind_attrs(el: &Element, node: &mut Node, ctx: &Ctx) {
     match node.kind.as_str() {
         "ProgressBar" => {
             let explicit_bar = el.attr("android:progress").is_some()
                 || el.attr("style").map(|st| st.contains("progressBarStyleHorizontal")).unwrap_or(false);
             node.style.spinner = match el.attr("android:indeterminate") {
-                Some(v) => res.boolean(v).unwrap_or(true),
+                Some(v) => ctx.res.boolean(v).unwrap_or(true),
                 None => !explicit_bar,
             };
             // Material progress indicators say which shape they are.

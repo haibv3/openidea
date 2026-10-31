@@ -109,6 +109,15 @@ fn content(n: &Node, inherited: Option<&str>) -> String {
     match n.kind.as_str() {
         "TextView" | "Button" | "OutlinedButton" | "TextButton" | "ElevatedButton" | "FilledTonalButton"
         | "IconButton" | "Chip" => {
+            let icon = match &n.style.icon {
+                Some(crate::layout::Image::Svg(svg)) => {
+                    format!("<span class=\"ap-btn-icon\">{svg}</span>")
+                }
+                Some(crate::layout::Image::Uri(uri)) => {
+                    format!("<span class=\"ap-btn-icon\" style=\"background-image:url('{uri}')\"></span>")
+                }
+                None => String::new(),
+            };
             let label = n.text.clone().or_else(|| n.sub.clone());
             let text = match label {
                 Some(text) => {
@@ -127,7 +136,7 @@ fn content(n: &Node, inherited: Option<&str>) -> String {
                 ),
                 None => String::new(),
             };
-            format!("{text}{kids}")
+            format!("{icon}{text}{kids}")
         }
         "EditText" => {
             let shown = n.text.clone().or_else(|| n.hint.clone()).unwrap_or_else(|| "…".to_owned());
@@ -143,12 +152,23 @@ fn content(n: &Node, inherited: Option<&str>) -> String {
             format!("<span class=\"ap-icon\">{}</span>{kids}", esc(&label))
         }
         "ImageView" | "ImageButton" => {
-            let label = n.sub.clone().unwrap_or_else(|| "image".to_owned());
-            format!(
-                "<span class=\"ap-image\"><span class=\"ap-image-glyph\">🖼</span>\
+            match &n.style.src_image {
+                // A `<vector>` renders inline so the pane needs no assets.
+                Some(crate::layout::Image::Svg(svg)) => {
+                    format!("<span class=\"ap-image ap-vector\">{svg}{kids}</span>")
+                }
+                // Bitmaps and shapes are painted on the box (view_style), the
+                // content is only the children.
+                Some(crate::layout::Image::Uri(_)) => kids,
+                None => {
+                    let label = n.sub.clone().unwrap_or_else(|| "image".to_owned());
+                    format!(
+                        "<span class=\"ap-image\"><span class=\"ap-image-glyph\">🖼</span>\
 <span class=\"ap-image-label\">{}</span>{kids}</span>",
-                esc(&label)
-            )
+                        esc(&label)
+                    )
+                }
+            }
         }
         "CheckBox" | "RadioButton" => {
             let checked = n.style.checked.unwrap_or(false);
@@ -193,7 +213,7 @@ fn content(n: &Node, inherited: Option<&str>) -> String {
             format!("<span class=\"ap-empty\">&lt;{}&gt;</span>", esc(&n.kind))
         }
         _ => match &n.sub {
-            Some(label) if n.kind == "Placeholder" => {
+            Some(label) if n.kind == "Placeholder" || n.kind == "View" => {
                 format!("<span class=\"ap-empty\">&lt;{}&gt;</span>", esc(label))
             }
             _ => kids,
@@ -340,6 +360,7 @@ fn effective_padding(s: &Style, d: &Defaults) -> Edges {
 
 /// Shared box styles for every view (positioning, size, spacing, paint).
 fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> String {
+    let abs_child = parent.map(|p| uses_absolute_children(p.kind.as_str())).unwrap_or(false);
     let s = &n.style;
     let mut out = String::new();
 
@@ -360,7 +381,7 @@ fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> Str
                 out.push_str(&format!("gap:{}px;", fmt(gap)));
             }
         }
-        "ScrollView" | "NestedScrollView" | "LazyColumn" => {
+        "ScrollView" | "NestedScrollView" | "LazyColumn" | "RecyclerView" | "ListView" => {
             out.push_str("display:flex;flex-direction:column;overflow-y:auto;");
             if let Some(g) = s.gravity {
                 out.push_str(&format!("align-items:{};", align_items(g.h)));
@@ -379,14 +400,15 @@ fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> Str
             ));
         }
         k if uses_absolute_children(k) || !n.children.is_empty() => {
-            out.push_str("position:relative;");
+            if !abs_child {
+                out.push_str("position:relative;");
+            }
         }
         _ => {}
     }
 
     // Size + positioning.
     let d = widget_defaults(&n.kind);
-    let abs_child = parent.map(|p| uses_absolute_children(p.kind.as_str())).unwrap_or(false);
     if root {
         out.push_str("overflow:hidden;");
         if stretch {
@@ -435,6 +457,12 @@ fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> Str
         }
     }
 
+    // `android:clipChildren="false"` lets children draw outside the box
+    // (Android clips by default). Compose nodes leave the flag unset.
+    if s.clip_children.unwrap_or(false) && !s.scroll_x && !s.scroll_y {
+        out.push_str("overflow:hidden;");
+    }
+
     // Theme minimums and content centring.
     if s.weight.is_none() {
         if let Some(w) = d.min_w {
@@ -455,6 +483,22 @@ fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> Str
         out.push_str(&format!("background:{};", esc(fill)));
     } else if let Some(bg) = d.bg {
         out.push_str(&format!("background:{};", esc(bg)));
+    }
+    // Drawable backgrounds / ImageView bitmaps: `centerCrop` → cover, fit →
+    // contain (or the scaleType we stored).
+    let paint_uri = [s.bg_image.as_ref(), s.src_image.as_ref()].into_iter().flatten().find_map(|i| match i {
+        crate::layout::Image::Uri(u) => Some(u),
+        _ => None,
+    });
+    if let Some(uri) = paint_uri {
+        let fit = match s.scale_type.unwrap_or("cover") {
+            "cover" => "cover",
+            "fill" => "100% 100%",
+            _ => "contain",
+        };
+        out.push_str(&format!(
+            "background-image:url('{uri}');background-size:{fit};background-position:center;background-repeat:no-repeat;"
+        ));
     }
     if let Some(r) = s.radius {
         out.push_str(&format!("border-radius:{}px;", fmt(r)));
@@ -765,6 +809,12 @@ body { font-family:Roboto,"Segoe UI",sans-serif; background:#B7B4BD; color:#1B1B
   gap:2px; width:100%; height:100%; min-width:48px; min-height:48px;
   background:rgba(0,0,0,.08); color:var(--ap-hint); border-radius:4px;
   font-size:11px; overflow:hidden; }
+.ap-vector svg, .ap-btn-icon svg { width:100%; height:100%; display:block; }
+.ap-vector { display:block; width:100%; height:100%; }
+.ap-btn-icon { display:inline-block; width:18px; height:18px; margin-right:8px;
+  vertical-align:middle; background-size:contain; background-repeat:no-repeat;
+  background-position:center; }
+.ap-btn-icon svg { color:inherit; }
 .ap-image-label { max-width:100%; overflow:hidden; text-overflow:ellipsis;
   white-space:nowrap; }
 .ap-check { display:inline-flex; align-items:center; gap:8px; }

@@ -56,22 +56,16 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"
 tokio-util = { version = "0.7", features = ["rt"] }
 parking_lot = "0.12"
 rayon = "1"
-dashmap = "6"
 futures = "0.3"
 
 # errors & diagnostics
 thiserror = "2"
-anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-
-# text & fs
-ropey = "1.6"
 encoding_rs = "0.8"
 chardetng = "0.1"
 ignore = "0.4"
 globset = "0.4"
-notify = "8"
 notify-debouncer-full = "0.6"
 trash = "5"
 blake3 = "1"

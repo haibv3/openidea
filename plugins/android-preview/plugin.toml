@@ -28,7 +28,7 @@ RelativeLayout, ConstraintLayout subset, ScrollView, GridLayout, CardView, commo
 widgets, resources, tools: overrides and includes) and Jetpack Compose @Preview
 functions (Column/Row/Box trees, modifiers, Material colors).
 """
-openidea-api = "0.3"
+openidea-api = "0.4"
 wasm = "dist/plugin.wasm"
 permissions = ["project-read"]
 

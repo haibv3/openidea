@@ -8,6 +8,7 @@ mod adb;
 mod deploy;
 mod device_fs;
 mod emulator;
+mod layoutlib;
 mod process;
 mod project;
 mod sdk;
@@ -16,5 +17,6 @@ pub use adb::{Adb, Device, LogEntry, LogFilter, parse_devices, parse_threadtime}
 pub use deploy::{DeployResult, deploy};
 pub use device_fs::{DeviceEntry, DeviceKind, parse_ls};
 pub use emulator::{list_avds, parse_avds, start_emulator};
+pub use layoutlib::{Layoutlib, RenderRequest, compile_bridge, render, studio_home};
 pub use project::{AndroidModule, assemble_task, find_apk, modules};
 pub use sdk::{AndroidPlatform, AndroidSdk, discover, is_android_project, local_properties_sdk};

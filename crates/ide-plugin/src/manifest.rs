@@ -5,7 +5,7 @@ use specta::Type;
 use std::path::{Component, Path, PathBuf};
 
 /// Plugin API version implemented by this host (`openidea-api` in the manifest).
-pub const API_VERSION: &str = "0.3";
+pub const API_VERSION: &str = "0.4";
 pub const MANIFEST_FILE: &str = "plugin.toml";
 
 /// Capabilities a plugin must declare to use the gated host functions.
@@ -441,7 +441,7 @@ mod tests {
         assert!(api_compatible("0.1.4"));
         assert!(api_compatible("0.2"));
         assert!(api_compatible(API_VERSION));
-        assert!(!api_compatible("0.4"));
+        assert!(!api_compatible("0.5"));
         assert!(!api_compatible("1.0"));
         assert!(api_compatible("0")); // a missing minor means 0
         assert!(!api_compatible("x"));
@@ -484,7 +484,7 @@ mod tests {
             format!("id = \"{id}\"\nname = \"N\"\nversion = \"1.0.0\"\nopenidea-api = \"{api}\"\n{extra}")
         };
         assert!(err(&base("", "Bad.Id", "0.1")).contains("invalid plugin id"));
-        assert!(err(&base("", "ok", "0.4")).contains("unsupported openidea-api"));
+        assert!(err(&base("", "ok", "0.5")).contains("unsupported openidea-api"));
         assert!(err(&base("", "ok", "0.10")).contains("unsupported openidea-api"));
         assert!(err(&base("permissions = [\"network\"]", "ok", "0.1")).contains("unknown variant"));
         assert!(err(&base("wasm = \"../evil.wasm\"", "ok", "0.1")).contains("relative path"));

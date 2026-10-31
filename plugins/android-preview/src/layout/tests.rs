@@ -257,10 +257,15 @@ fn top_level_merge_unwraps() {
 
 #[test]
 fn unknown_views_and_fragments() {
-    // Class-name tags keep their short name; render.rs treats unknown kinds as
-    // labelled placeholders.
+    // A custom class with no built-in equivalent becomes a labelled box.
     let root = one(r#"<com.example.CustomView android:layout_width="40dp"/>"#);
-    assert_eq!(root.kind, "CustomView");
+    assert_eq!(root.kind, "View");
+    assert_eq!(root.sub.as_deref(), Some("CustomView"));
+
+    // Custom classes that end in a known widget name preview as that widget.
+    let root = one(r#"<com.vinfast.ivi.oneui.button.OneUIButton android:text="Go"/>"#);
+    assert_eq!(root.kind, "Button");
+    assert_eq!(root.text.as_deref(), Some("Go"));
 
     let root = one(r#"<fragment android:name="com.example.ui.MyFragment"/>"#);
     assert_eq!(root.kind, "Placeholder");

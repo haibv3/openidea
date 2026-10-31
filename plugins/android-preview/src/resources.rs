@@ -19,6 +19,37 @@ use crate::xml;
 pub trait ResourceSource {
     fn read(&self, path: &str) -> Option<String>;
     fn list(&self, dir: &str) -> Vec<String>;
+    /// Raw bytes of a file (images). Text-only sources leave the default.
+    fn read_bytes(&self, _path: &str) -> Option<Vec<u8>> {
+        None
+    }
+    /// `values*/*.xml` contents, least authoritative first so a later file
+    /// overrides an earlier one. Multi-root sources (module res plus merged
+    /// library resources) order the roots so the app's own values come last.
+    fn values_files(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut values_dirs: Vec<(u32, String)> =
+            self.list("").into_iter().filter_map(|entry| values_dir_version(&entry).map(|v| (v, entry))).collect();
+        values_dirs.sort();
+        for (_, entry) in values_dirs {
+            for file in self.list(&entry) {
+                if file.ends_with(".xml") {
+                    if let Some(text) = self.read(&format!("{entry}/{file}")) {
+                        out.push(text);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+/// A resolved `@drawable`/`@mipmap`: a parsed `<shape>`, an inline SVG built
+/// from a `<vector>`, or a `data:` URI wrapping a bitmap file.
+pub enum ResDrawable {
+    Shape(ShapeDrawable),
+    Svg(String),
+    Image(String),
 }
 
 /// An in-memory source for tests. Directory listings are derived from the
@@ -162,6 +193,82 @@ pub fn android_color(name: &str) -> Option<&'static str> {
     })
 }
 
+/// SVG `<path>` elements for a `<vector>` tree (groups flattened; fill and
+/// stroke colours resolved through the resource tables).
+fn vector_paths(el: &xml::Element, out: &mut String, res: &Resources) {
+    for child in el.elements() {
+        match child.name_local() {
+            "path" => {
+                let Some(d) = child.attr("android:pathData") else { continue };
+                let fill = child
+                    .attr("android:fillColor")
+                    .and_then(|v| res.color(v, 0))
+                    .unwrap_or_else(|| "#FF000000".to_owned());
+                let mut extra = String::new();
+                if let Some(a) = child.attr("android:fillAlpha").and_then(|v| v.trim().parse::<f32>().ok()) {
+                    extra.push_str(&format!(" fill-opacity=\"{a}\""));
+                }
+                if let Some(sc) = child.attr("android:strokeColor").and_then(|v| res.color(v, 0)) {
+                    let sw =
+                        child.attr("android:strokeWidth").and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(1.0);
+                    out.push_str(&format!(
+                        "<path d=\"{}\" fill=\"{fill}\" stroke=\"{sc}\" stroke-width=\"{sw}\"{extra}/>",
+                        xml_escape(d)
+                    ));
+                } else {
+                    out.push_str(&format!("<path d=\"{}\" fill=\"{fill}\"{extra}/>", xml_escape(d)));
+                }
+            }
+            "group" | "clip-path" => vector_paths(child, out, res),
+            _ => {}
+        }
+    }
+}
+
+/// Minimal `&` `<` escaping for attribute values.
+fn xml_escape(v: &str) -> String {
+    v.replace('&', "&amp;").replace('<', "&lt;").replace('"', "&quot;")
+}
+
+/// `data:` URI for a bitmap, by magic bytes (ext as fallback for the MIME).
+fn data_uri(bytes: &[u8], ext: &str) -> Option<String> {
+    let mime = if bytes.starts_with(b"\x89PNG") {
+        "image/png"
+    } else if bytes.starts_with(b"\xFF\xD8") {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        match ext {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "webp" => "image/webp",
+            "gif" => "image/gif",
+            _ => return None,
+        }
+    };
+    Some(format!("data:{mime};base64,{}", base64_encode(bytes)))
+}
+
+/// RFC 4648 base64.
+pub fn base64_encode(bytes: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len() / 3 * 4 + 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let n = b0 << 16 | b1 << 8 | b2;
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 /// Built-in `@android:string/…` subset.
 fn android_string(name: &str) -> Option<&'static str> {
     Some(match name {
@@ -244,6 +351,7 @@ pub struct Resources<'a> {
     styles: HashMap<String, StyleDef>,
     layout_dirs: Vec<String>,
     drawable_dirs: Vec<String>,
+    mipmap_dirs: Vec<String>,
 }
 
 impl<'a> Resources<'a> {
@@ -262,22 +370,14 @@ impl<'a> Resources<'a> {
             styles: HashMap::new(),
             layout_dirs: Vec::new(),
             drawable_dirs: Vec::new(),
+            mipmap_dirs: Vec::new(),
         };
-        // Only the configurations the default preview shows: `values` plus
-        // API-level variants. `values-night`, `values-fr`, `values-w600dp`…
-        // describe other configurations and must not override the base table.
-        let mut values_dirs: Vec<(u32, String)> =
-            source.list("").into_iter().filter_map(|entry| values_dir_version(&entry).map(|v| (v, entry))).collect();
-        // Base first, then ascending API level: the newest applicable wins.
-        values_dirs.sort();
-        for (_, entry) in values_dirs {
-            for file in source.list(&entry) {
-                if file.ends_with(".xml") {
-                    if let Some(text) = source.read(&format!("{entry}/{file}")) {
-                        res.load_values(&text);
-                    }
-                }
-            }
+        // `values_files` orders the roots: merged library resources first,
+        // the module's own `values/` last so it wins on ties. Only the
+        // configurations the default preview shows (`values` plus API-level
+        // variants; `values-night`, `values-fr`… are filtered by the source).
+        for text in source.values_files() {
+            res.load_values(&text);
         }
         for entry in source.list("") {
             if values_dir_version(&entry).is_some() {
@@ -287,6 +387,8 @@ impl<'a> Resources<'a> {
                 res.layout_dirs.push(entry);
             } else if entry.starts_with("drawable") {
                 res.drawable_dirs.push(entry);
+            } else if entry.starts_with("mipmap") {
+                res.mipmap_dirs.push(entry);
             }
         }
         // `layout` itself first, so unqualified includes win over -land/-sw600dp.
@@ -428,6 +530,74 @@ impl<'a> Resources<'a> {
         None
     }
 
+    /// `?attr/x` looked up in the active theme (the `android:theme` style
+    /// chain); unknown attributes fall back to the built-in M3 palette.
+    pub fn color_in_theme(&self, raw: &str, theme: &[(String, String)], depth: usize) -> Option<String> {
+        let raw = raw.trim();
+        if raw.starts_with('?') {
+            let name = raw.rsplit('/').next().unwrap_or(raw).trim_start_matches("attr/");
+            if depth <= 8 {
+                if let Some(v) = theme.iter().rev().find(|(n, _)| n == name).map(|(_, v)| v.clone()) {
+                    return self.color_in_theme(&v, theme, depth + 1);
+                }
+            }
+            return theme_attr_css(raw).map(str::to_owned);
+        }
+        self.color(raw, depth)
+    }
+
+    /// All items of a theme (`android:` and custom attributes alike) —
+    /// `style_attrs` on the theme's style chain.
+    pub fn theme_attrs(&self, raw: &str) -> Vec<(String, String)> {
+        self.style_attrs(raw)
+    }
+
+    /// `@drawable/x` / `@mipmap/x` → shape, vector (as inline SVG) or bitmap
+    /// (as a `data:` URI). Searches `drawable*` then `mipmap*` directories.
+    pub fn drawable(&self, name: &str) -> Option<ResDrawable> {
+        if let Some(shape) = self.drawable_shape(name) {
+            return Some(ResDrawable::Shape(shape));
+        }
+        for dirs in [&self.drawable_dirs, &self.mipmap_dirs] {
+            for dir in dirs {
+                for ext in ["xml", "png", "webp", "jpg", "jpeg", "gif"] {
+                    let path = format!("{dir}/{name}.{ext}");
+                    if ext == "xml" {
+                        if let Some(text) = self.source.read(&path) {
+                            if let Some(svg) = self.vector_svg(&text) {
+                                return Some(ResDrawable::Svg(svg));
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(bytes) = self.source.read_bytes(&path) {
+                        if let Some(uri) = data_uri(&bytes, ext) {
+                            return Some(ResDrawable::Image(uri));
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// `<vector>` → an inline SVG (paths and groups only; fills resolved).
+    fn vector_svg(&self, text: &str) -> Option<String> {
+        let doc = xml::parse(text).ok()?;
+        let root = doc.root?;
+        if root.name_local() != "vector" {
+            return None;
+        }
+        let vw = root.attr("android:viewportWidth").and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(24.0);
+        let vh = root.attr("android:viewportHeight").and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(24.0);
+        let mut body = String::new();
+        vector_paths(&root, &mut body, self);
+        if body.is_empty() {
+            return None;
+        }
+        Some(format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {vw} {vh}\">{body}</svg>"))
+    }
+
     /// Merged `android:` items of `@style/X` (ancestors first, child overrides
     /// keeping the ancestor's slot order).
     pub fn style_attrs(&self, raw: &str) -> Vec<(String, String)> {
@@ -466,7 +636,7 @@ fn color_from_aarrggbb(v: &str) -> String {
 
 /// API level of a `values` directory the default preview applies, `None` for
 /// other configurations (`values-night`, `values-fr`, `values-w600dp`, …).
-fn values_dir_version(dir: &str) -> Option<u32> {
+pub fn values_dir_version(dir: &str) -> Option<u32> {
     let mut parts = dir.split('-');
     if parts.next() != Some("values") {
         return None;

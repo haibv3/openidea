@@ -50,6 +50,12 @@ fn contained(root: &Path, relative: &Path) -> Result<PathBuf, String> {
 
 /// Reads a UTF-8 file that `resolve_in_root` already approved.
 pub fn read_text(real: &Path) -> Result<String, String> {
+    let bytes = read_bytes(real)?;
+    String::from_utf8(bytes).map_err(|_| format!("{}: not valid UTF-8 text", real.display()))
+}
+
+/// Reads a file that `resolve_in_root` already approved, as raw bytes.
+pub fn read_bytes(real: &Path) -> Result<Vec<u8>, String> {
     let meta = std::fs::metadata(real).map_err(|e| e.to_string())?;
     if !meta.is_file() {
         return Err(format!("{}: not a file", real.display()));
@@ -57,8 +63,7 @@ pub fn read_text(real: &Path) -> Result<String, String> {
     if meta.len() > MAX_READ_BYTES {
         return Err(format!("{}: file is larger than {} MiB", real.display(), MAX_READ_BYTES >> 20));
     }
-    let bytes = std::fs::read(real).map_err(|e| e.to_string())?;
-    String::from_utf8(bytes).map_err(|_| format!("{}: not valid UTF-8 text", real.display()))
+    std::fs::read(real).map_err(|e| e.to_string())
 }
 
 /// Resolves a path that may not exist yet, keeping it inside `root`.

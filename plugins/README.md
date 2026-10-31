@@ -76,7 +76,8 @@ permission **traps**: the plugin is stopped and the user is told which
 permission is missing.
 
 API 0.2 added the last five rows and the file-system writes. API 0.3 added
-file previews (see _6. File previews_). The version in `openidea-api` is what
+file previews (see _6. File previews_). API 0.4 added `read-file-bytes` for
+binary assets (images) next to the UTF-8 `read-file`. The version in `openidea-api` is what
 the plugin claims to target; the host accepts anything with the same major and
 a minor it implements (so `0.1` plugins keep loading). The component-model
 interface itself stays at `openidea:plugin@0.1.0` — new functions are added in
