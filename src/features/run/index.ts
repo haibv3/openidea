@@ -35,6 +35,8 @@ import { debugWithAgent, jdwpLaunch } from "./javaDebug";
 import { RunDialogsOverlay } from "./dialogs";
 import { registerExternalTools } from "./externalTools";
 import { EditConfigsOverlay } from "./EditConfigsDialog";
+import { registerGoActions } from "./goActions";
+import { invalidateGoModules } from "./goModules";
 import { RunWidget } from "./RunWidget";
 import { runConfigsRunAnything } from "./runAnything";
 import { runServiceProvider } from "./services";
@@ -42,6 +44,7 @@ import { runBeforeLaunch } from "./beforeLaunch";
 import { compoundChildren } from "./configs";
 import { remoteDebugBlocked } from "./remote";
 import { isDebugOnly, registerBuiltinTypes } from "./types";
+import { showTomcatUpdate } from "./tomcatUpdate";
 import { runGutter } from "./runGutter";
 import { activateStackTrace, useStackTraces } from "./stackTrace";
 import { clearRuntimeCache } from "./runtimes";
@@ -51,6 +54,7 @@ import {
   CURRENT_FILE,
   currentFileSelected,
   prepareLaunch,
+  rescheduleConsoleFlushes,
   setBeforeLaunchRunner,
   loadConfigs,
   failedTests,
@@ -243,7 +247,7 @@ function useRunningCount(): number | null {
 }
 
 const CONFIG_FILES =
-  /(?:^|\/)(?:\.openidea\/run\.toml|package\.json|deno\.jsonc?|Cargo\.toml|build\.gradle(?:\.kts)?|pom\.xml|go\.mod|pyproject\.toml|setup\.cfg|pytest\.ini|manage\.py|Makefile|justfile)$/;
+  /(?:^|\/)(?:\.openidea\/run\.toml|package\.json|deno\.jsonc?|Cargo\.toml|build\.gradle(?:\.kts)?|pom\.xml|go\.(?:mod|work)|pyproject\.toml|setup\.cfg|pytest\.ini|manage\.py|Makefile|justfile|CMakeLists\.txt|CMakeCache\.txt|index-[^/]+\.json)$/;
 
 let reloadTimer: ReturnType<typeof setTimeout> | undefined;
 function scheduleReload() {
@@ -267,6 +271,7 @@ export function activate(): () => void {
     registerTitleItem({ id: "run.widget", title: "Run Widget", align: "right", priority: 0, component: RunWidget }),
     registerRunAnythingProvider(runConfigsRunAnything),
     registerBuiltinTypes(),
+    registerGoActions(),
     registerOverlay({ id: "run.chooser", component: ConfigChooserOverlay }),
     registerOverlay({ id: "run.editConfigs", component: EditConfigsOverlay }),
     registerOverlay({ id: "run.dialogs", component: RunDialogsOverlay }),
@@ -282,6 +287,14 @@ export function activate(): () => void {
       prepare: prepareMenu,
     }),
     registerActions([
+      {
+        id: "run.updateApplication",
+        title: "Update Application",
+        category: "Run",
+        icon: "refresh",
+        when: "run.tomcatRunning",
+        run: () => showTomcatUpdate(),
+      },
       {
         id: "run.run",
         title: "Run",
@@ -494,7 +507,13 @@ export function activate(): () => void {
     ]),
     onIdeEvent("runExited", (e) => onRunExited(e.run, e.code)),
     // Lets other title items follow the selected configuration (e.g. Build shows only for compiled ones).
-    useRun.subscribe((s) => setContext("run.selectedKind", s.configs.find((c) => c.id === s.selectedId)?.kind ?? "")),
+    useRun.subscribe((s) => {
+      setContext("run.selectedKind", s.configs.find((c) => c.id === s.selectedId)?.kind ?? "");
+      setContext(
+        "run.tomcatRunning",
+        s.sessions.some((session) => session.config.kind === "tomcat" && session.status === "running"),
+      );
+    }),
     useProject.subscribe((s, prev) => {
       if (s.project?.root === prev.project?.root) return;
       resetRuns();
@@ -511,13 +530,23 @@ export function activate(): () => void {
   disposers.push(
     onIdeEvent("fsChanged", (e) => {
       const paths = [...e.created, ...e.modified, ...e.removed];
+      if (paths.some((p) => /(?:^|\/)go\.(?:mod|work)$/.test(p))) invalidateGoModules();
       if (paths.some((p) => CONFIG_FILES.test(p))) scheduleReload();
+    }),
+    onIdeEvent("runExited", (e) => {
+      if (useRun.getState().sessions.some((s) => s.runId === e.run && s.config.kind === "cmake")) scheduleReload();
     }),
     // Detected configs carry the selected toolchains (interpreter, JDK, Maven home and options).
     onIdeEvent("settingsChanged", (e) => {
       if (e.key === "languages" || e.key.startsWith("languages.")) scheduleReload();
     }),
   );
+
+  // Hidden tabs pause rAF: move pending console flushes to timeouts (and back on
+  // return) so output keeps draining while a run continues in the background.
+  const onVisibility = () => rescheduleConsoleFlushes();
+  document.addEventListener("visibilitychange", onVisibility);
+  disposers.push(() => document.removeEventListener("visibilitychange", onVisibility));
 
   return () => {
     clearTimeout(reloadTimer);

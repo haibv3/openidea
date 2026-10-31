@@ -41,6 +41,20 @@ const ICONS = {
   "folder-library": "nodes/libraryFolder",
   "folder-github": "nodes/folderGithub",
   module: "nodes/module",
+  "folder-generated-source": "nodes/generatedSource",
+  "folder-generated-test": "nodes/generatedTestRoot",
+  "folder-compiled": "nodes/compiledClassesFolder",
+  "folder-javadoc": "nodes/javaDocFolder",
+  "class-abstract": "nodes/classAbstract",
+  record: "nodes/record",
+  annotation: "nodes/annotation",
+  exception: "nodes/exception",
+  "jvm-test": "nodes/test",
+  "runnable-mark": "nodes/runnableMark",
+  "kotlin-object": "kotlin/objectKotlin",
+  "spring-config": "openidea/runConfigurations/springBoot",
+  "gradle-project": "gradle/gradle",
+  "gradle-module": "gradle/gradleSubproject",
   "spring-boot": "openidea/runConfigurations/springBoot",
   file: "fileTypes/text",
   "file-unknown": "fileTypes/unknown",
@@ -394,6 +408,43 @@ const ICONS = {
   "star-outline": "openidea/vcs/notFavorite",
   tag: "openidea/vcs/tag",
   "current-branch": "openidea/vcs/currentBranch",
+  // Code review / GitHub pull requests (collaboration-tools, GitHub plugin, DVCS)
+  "branch-label": "vcs/branchLabel",
+  "current-branch-label": "vcs/currentBranchLabel",
+  "github-pr-open": "github/pullRequestOpen",
+  "github-pr-closed": "github/pullRequestClosed",
+  "github-pr-draft": "github/pullRequestDraft",
+  "github-pr-merged": "github/pullRequestMerged",
+  "github-review": "github/review",
+  "github-review-accepted": "github/reviewAccepted",
+  "github-review-rejected": "github/reviewRejected",
+  "github-timeline": "github/timeline",
+  "github-issue-open": "github/issueOpened",
+  "github-issue-closed": "github/issueClosed",
+  "github-local-branch": "github/localBranch",
+  "github-warning": "github/githubWarning",
+  "add-emoji": "github/addEmoji",
+  "add-emoji-hovered": "github/addEmojiHovered",
+  send: "github/send",
+  "send-hovered": "github/sendHovered",
+  "review-comment": "github/comment",
+  "review-comment-unread": "github/review/commentUnread",
+  "review-comment-hovered": "github/review/commentHovered",
+  "review-comment-read-many": "github/review/commentReadMany",
+  "review-comment-unread-many": "github/review/commentUnreadMany",
+  "review-file-unread": "github/review/fileUnread",
+  "review-default-avatar": "github/review/defaultAvatar",
+  "review-non-mergeable": "github/review/nonMergeable",
+  "review-branch-current": "github/review/branchCurrent",
+  "inline-add": "inline/inlineAdd",
+  "inline-add-hover": "inline/inlineAddHover",
+  "edit-source": "actions/editSource",
+  "green-checkmark": "general/greenCheckmark",
+  // CI / code review status (`CIBuildStatusIcons`)
+  "ci-pending": "run/testNotRunYet",
+  "ci-failed": "run/testError",
+  "ci-skipped": "run/testSkipped",
+  "ci-failed-in-progress": "status/failedInProgress",
   // Symbols (also used by `symbol-<kind>`)
   class: "nodes/class",
   interface: "nodes/interface",
@@ -880,7 +931,12 @@ export type FolderKind =
   | "excluded"
   | "library"
   | "github"
-  | "module";
+  | "module"
+  | "package"
+  | "generatedSource"
+  | "generatedTest"
+  | "compiled"
+  | "javadoc";
 
 /** Folder icon by role (expui has no separate "open" folder glyph). */
 export function folderIconName(kind: FolderKind = "plain"): IconName {
@@ -901,6 +957,16 @@ export function folderIconName(kind: FolderKind = "plain"): IconName {
       return "folder-github";
     case "module":
       return "module";
+    case "package":
+      return "package";
+    case "generatedSource":
+      return "folder-generated-source";
+    case "generatedTest":
+      return "folder-generated-test";
+    case "compiled":
+      return "folder-compiled";
+    case "javadoc":
+      return "folder-javadoc";
     default:
       return "folder";
   }

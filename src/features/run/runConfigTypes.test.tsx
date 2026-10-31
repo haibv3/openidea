@@ -16,6 +16,7 @@ import {
 import { typeRows } from "./AddConfigPopup";
 import { runBeforeLaunch } from "./beforeLaunch";
 import { buildRows } from "./ConfigChooser";
+import { memberRows } from "./ConfigForm";
 import { compoundChildren, compoundCycle, formatEnv, parseEnv, validateConfig } from "./configs";
 import { contextConfig } from "./context";
 import { EditConfigsOverlay, moveConfig, treeRows } from "./EditConfigsDialog";
@@ -347,6 +348,17 @@ describe("compound configurations", () => {
         .sort(),
     ).toEqual(["a", "b"]);
   });
+
+  it("member picker lists candidates and filters them by name", () => {
+    // `outer` contains `inner`, so adding it to `inner` would close a cycle.
+    const rows = memberRows(inner, [a, b, inner, outer], [], "");
+    expect(rows.map((r) => r.config.id)).toEqual(["a", "b"]);
+    // Already-added members and the compound itself are excluded.
+    expect(memberRows(inner, [a, b, inner, outer], ["a"], "").map((r) => r.config.id)).toEqual(["b"]);
+    const named = cfg("named", { name: "Deploy App" });
+    expect(memberRows(outer, [a, b, inner, outer, named], ["a"], "deploy").map((r) => r.config.id)).toEqual(["named"]);
+    expect(memberRows(outer, [a, b, inner, outer, named], ["a"], "zzz")).toEqual([]);
+  });
 });
 
 describe("before launch tasks", () => {
@@ -367,7 +379,7 @@ describe("before launch tasks", () => {
       ],
     });
     expect(await runBeforeLaunch(app, [app.id])).toBe(true);
-    expect(build).toHaveBeenCalledOnce();
+    expect(build).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ arg: { activate: false } }));
     expect(show).toHaveBeenCalledWith("todo", true);
 
     build.mockImplementation(async () => setContext("build.lastStatus", "failed"));

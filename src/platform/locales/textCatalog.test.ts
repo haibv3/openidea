@@ -79,6 +79,20 @@ const BUILT_AT_RUNTIME = new Set<string>([]);
 
 /** Text that stays as written in every locale: names, code, formats, shortcuts. */
 const UNTRANSLATED = new Set<string>([
+  // Go environment variables and placeholder values
+  "CGO",
+  "GOPROXY",
+  "GOPRIVATE",
+  "GOFLAGS",
+  "GONOPROXY",
+  "GONOSUMDB",
+  "GOSUMDB",
+  "GOMODCACHE",
+  "GOTOOLCHAIN",
+  "GOWORK",
+  "go1.22",
+  "integration debug",
+  "loopvar,rangefunc",
   // SSH and run-target placeholders
   "SSH",
   "example.com",
@@ -115,6 +129,7 @@ const UNTRANSLATED = new Set<string>([
   "Greenplum",
   "Java",
   "java-debug (Java)",
+  "kotlin-debug-adapter (Kotlin)",
   "js-debug (Node.js / TypeScript)",
   "JSON",
   "lldb-dap (C, C++, Swift)",

@@ -1,3 +1,4 @@
+import { useFilePresentationIcons } from "@/platform/filePresentation";
 /**
  * The editor area: split layout of panes, each with IDEA-style tabs (preview
  * tab in italics, pinned tabs, modified dot, file icons coloured by file
@@ -145,6 +146,9 @@ function PaneView({ paneId }: { paneId: string }) {
   const { showExtension, markModified, showCloseButton, showFileIcon, showDirectoryForNonUnique, showFullPathOnHover } =
     tabPrefs;
 
+  const fileIcons = useFilePresentationIcons(
+    showFileIcon ? tabs.flatMap((t) => (t.input.kind === "file" && t.input.path ? [t.input.path] : [])) : [],
+  );
   const items: TabItem[] = useMemo(() => {
     const names = tabs.map((t) => tabTitle(t.input, kinds));
     return tabs.map((t, i) => {
@@ -167,7 +171,11 @@ function PaneView({ paneId }: { paneId: string }) {
           </>
         ),
         text: dupe ? `${name} — ${dupe}` : name,
-        icon: showFileIcon ? tabIcon(t.input, kinds) : undefined,
+        icon: showFileIcon
+          ? t.input.kind === "file" && t.input.path
+            ? fileIcons.get(t.input.path)
+            : tabIcon(t.input, kinds)
+          : undefined,
         italic: t.preview,
         modified: dirty[i],
         closable: showCloseButton,
@@ -178,6 +186,7 @@ function PaneView({ paneId }: { paneId: string }) {
       };
     });
   }, [
+    fileIcons,
     tabs,
     kinds,
     dirty,
@@ -198,6 +207,11 @@ function PaneView({ paneId }: { paneId: string }) {
   const pinnedRow =
     tabPrefs.pinnedSeparateRow && (vertical || !tabPrefs.multipleRows) && pinnedCount > 0 && pinnedCount < tabs.length;
   const dnd = useMemo(() => {
+    // A tab released outside the window detaches into a forced new window.
+    const dropOutside = (raw: string) => {
+      const p = parseTabPayload(raw);
+      if (p) void ctrl.detachTab(p.paneId, p.tabId);
+    };
     const strip = (offset: number): TabsDnd => ({
       type: EDITOR_TAB_MIME,
       payload: (tabId) => JSON.stringify({ paneId, tabId }),
@@ -205,6 +219,7 @@ function PaneView({ paneId }: { paneId: string }) {
         const p = parseTabPayload(raw);
         if (p) ctrl.moveTab(p.paneId, p.tabId, paneId, index + offset);
       },
+      onDropOutside: dropOutside,
     });
     return { all: strip(0), rest: strip(pinnedCount) };
   }, [ctrl, paneId, pinnedCount]);

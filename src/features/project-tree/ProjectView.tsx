@@ -24,7 +24,7 @@ import { setContext } from "@/platform/context";
 import { tx, useTxTemplate } from "@/platform/i18n";
 import { isTauri } from "@/platform/ipc";
 import type { RootFolder } from "@/platform/languageSettings";
-import { useEffectiveRoots } from "@/platform/projectRoots";
+import { useDetectedRoots, useEffectiveRoots } from "@/platform/projectRoots";
 import { macStroke, strokeOf } from "@/platform/keymap";
 import { OWNS_FILE_DROP, prepareMenuGroups, useFileDecoration } from "@/workbench/contributions";
 import {
@@ -44,6 +44,9 @@ import {
 } from "@/ui";
 import { contextMenuItems, menuGroupContext, newMenuItems } from "./contextMenu";
 import { openNewPopup } from "./newPopupModel";
+import { presentationIcon, useJvmPresentation } from "@/platform/filePresentation";
+import { moduleFolderIcon, useProjectPresentation, type BuildPresentation } from "@/platform/projectPresentation";
+import { relativePath } from "@/platform/project";
 import { folderKind } from "./folderKind";
 import { useHomeDir } from "./home";
 import { keyLike, nodeKeyFor, visibleInfo, type ProjectNode } from "./model";
@@ -109,11 +112,23 @@ const getLabel = (n: ProjectNode) => n.label;
 const isExpandable = (n: ProjectNode) => n.dir && !n.placeholder;
 const loadChildren = (n: ProjectNode) => loadDir(n.path);
 
-function iconFor(node: ProjectNode, roots: readonly RootFolder[], root: string | null): string {
+function iconFor(
+  node: ProjectNode,
+  roots: readonly RootFolder[],
+  root: string | null,
+  build: BuildPresentation,
+  detected: readonly RootFolder[],
+): string {
   if (node.placeholder) return node.placeholder === "dir" ? "folder" : "file";
   if (node.icon) return node.icon;
-  if (node.root) return "module";
-  if (node.dir) return folderIconName(folderKind(node, roots, root));
+  if (node.dir) {
+    const kind = folderKind(node, roots, root, build, detected);
+    if (kind !== "plain") return folderIconName(kind);
+    const rel = root ? (node.path === root ? "" : relativePath(root, node.path)) : null;
+    const module = rel === null ? null : moduleFolderIcon(rel, node.root, build.modules);
+    if (module) return module;
+    return node.root ? "module" : "folder";
+  }
   return fileIconName(node.label);
 }
 
@@ -246,7 +261,13 @@ const Row = memo(function Row({
   const deco = useFileDecoration(node.path);
   const roots = useEffectiveRoots();
   const root = useProjectTree((s) => s.root);
-  const icon = iconFor(node, roots, root);
+  const detected = useDetectedRoots();
+  const build = useProjectPresentation();
+  const file = useJvmPresentation(node.dir || node.placeholder ? "" : node.path, node.entry?.mtimeMs);
+  const icon =
+    node.dir || node.placeholder || node.icon
+      ? iconFor(node, roots, root, build, detected)
+      : presentationIcon(node.path, file, roots, root, build.spring);
   const isEditing =
     !!editing && (node.placeholder ? editing.kind === "new" : editing.kind === "rename" && editing.key === node.key);
   const faded = node.ignored || deco.faded;
@@ -263,11 +284,16 @@ const Row = memo(function Row({
       onDoubleClick={(e) => onDoubleClick(node, e)}
       onPointerDown={(e) => onPointerDown(node, e)}
     >
-      <Icon
-        name={icon}
-        size={16}
-        className={clsx(styles.icon, node.dir && styles.folderIcon, dimIcon && styles.faded)}
-      />
+      <span className={styles.iconStack}>
+        <Icon
+          name={icon}
+          size={16}
+          className={clsx(styles.icon, node.dir && styles.folderIcon, dimIcon && styles.faded)}
+        />
+        {!!file?.runnable && icon !== "spring-boot" && icon !== "jvm-test" && (
+          <Icon name="runnable-mark" size={16} className={styles.runnable} />
+        )}
+      </span>
       {isEditing && editing ? (
         <InlineEditor
           editing={editing}
@@ -279,6 +305,7 @@ const Row = memo(function Row({
           <HighlightedText
             className={clsx(
               styles.label,
+              node.root && styles.rootName,
               // Only the project itself is bold (IDEA); contributed roots like Scratches are not.
               node.root && !node.icon && styles.rootLabel,
               faded && !deco.color && styles.excluded,
@@ -604,7 +631,6 @@ export function ProjectView() {
   };
 
   const cutPaths = useMemo(() => new Set(clipboard?.cut ? clipboard.paths : []), [clipboard]);
-  const rootDetail = root ? tildify(root, home) : null;
 
   const renderNode = useCallback(
     (node: ProjectNode, state: TreeRowState) => (
@@ -614,14 +640,14 @@ export function ProjectView() {
         editing={editing}
         cut={cutPaths.has(node.path)}
         dropTarget={dropTarget === node.key}
-        detail={node.root && !node.icon ? rootDetail : (node.detail ?? null)}
+        detail={node.root && !node.icon ? tildify(node.path, home) : (node.detail ?? null)}
         onEditDone={focusTree}
         onClick={onRowClick}
         onDoubleClick={onRowDoubleClick}
         onPointerDown={onRowPointerDown}
       />
     ),
-    [editing, cutPaths, dropTarget, rootDetail, focusTree, onRowClick, onRowDoubleClick, onRowPointerDown],
+    [editing, cutPaths, dropTarget, home, focusTree, onRowClick, onRowDoubleClick, onRowPointerDown],
   );
 
   if (!root) return null;
@@ -645,11 +671,13 @@ export function ProjectView() {
         </div>
       )}
       <Tree<ProjectNode>
+        horizontalScroll
         aria-label="Project"
         handleRef={setTreeHandle}
         roots={model.roots}
         getKey={getKey}
         getLabel={getLabel}
+        getDirectory={(node) => (node.group || node.placeholder ? null : targetFolder(node))}
         getChildren={getChildren}
         isExpandable={isExpandable}
         loadChildren={loadChildren}

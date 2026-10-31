@@ -264,6 +264,7 @@ html {
   --bg-scrim: rgba(0, 0, 0, 0.45);
   --fg-on-accent: #ffffff;
   --accent-soft: color-mix(in srgb, var(--accent) 16%, transparent);
+  --bg-log-current-branch: color-mix(in srgb, var(--accent) 8%, var(--bg-app));
   --accent-hover: color-mix(in srgb, var(--accent) 86%, var(--fg-strong));
   --match: var(--accent);
   --shadow-tooltip: 0 4px 12px rgba(0, 0, 0, 0.4);

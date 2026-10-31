@@ -17,8 +17,9 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
-import type { RunConfig } from "@/bindings";
+import type { FileMatches, SearchQuery, RunConfig } from "@/bindings";
 import type { MenuItem } from "@/ui/Menu";
+import type { TreeReorder } from "@/ui/Tree";
 import { create } from "zustand";
 import { useShallow } from "zustand/react/shallow";
 
@@ -232,6 +233,8 @@ export interface ServiceProviderContribution {
   banner?: ComponentType;
   /** Entries of the "Add Service" (+, ⌘N) menu. */
   addMenu?(): MenuItem[];
+  /** Optional sibling display ordering; does not move services between groups. */
+  reorder?: TreeReorder<ServiceTreeItem>;
 }
 
 export const useServiceProviders = create<{ providers: Map<string, ServiceProviderContribution> }>(() => ({
@@ -497,6 +500,8 @@ export interface EditorService {
   activeCursor(): { doc: number; path: string; line: number; col: number; offset: number } | null;
   /** Save all dirty documents; rejects with the failures once every save was tried. */
   saveAll(): Promise<void>;
+  /** Includes local edits not yet acknowledged by the backend. */
+  dirtyDocumentIds?(): number[];
   /** Move keyboard focus to the active editor (used by Escape from tool windows). */
   focus?(): void;
   /** Paths of the documents open in editor tabs (all panes, tab order). */
@@ -616,6 +621,26 @@ export const notifications = (): NotificationService =>
 export const maybeEditorService = (): EditorService | undefined => services.editor;
 /** Creates terminal widgets; provided by the terminal feature. */
 export const embeddedTerminal = (): EmbeddedTerminalFactory | undefined => services.embeddedTerminal;
+
+/** Editor-backed results, recomputed on rerun without reading files from disk. */
+export interface FindResultsSource {
+  title: string;
+  query: SearchQuery;
+  read(): FileMatches;
+}
+
+let findResultsOpener: ((source: FindResultsSource) => void) | undefined;
+
+export function provideFindResults(opener: (source: FindResultsSource) => void): () => void {
+  findResultsOpener = opener;
+  return () => {
+    if (findResultsOpener === opener) findResultsOpener = undefined;
+  };
+}
+
+export function showFindResults(source: FindResultsSource) {
+  findResultsOpener?.(source);
+}
 
 // ---------------------------------------------------------------------------
 // File decorations: colour / badge / tooltip for a path, shown by the project

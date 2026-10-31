@@ -2,12 +2,12 @@
 //! writes (commit, checkout, push/pull, stash, merge) shell out to `git` so
 //! hooks, credentials and signing behave exactly as on the command line.
 
-use encoding_rs::Encoding;
 use ide_core::ignored::IgnoredNames;
 use ide_core::{CancellationToken, IdeResult};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::path::{Path, PathBuf};
+pub use text_encoding::TextEncoding;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -237,6 +237,19 @@ pub enum PushTags {
     CurrentBranch,
 }
 
+/// Options of [`Repo::push_branch_to`]: which commits to push and where to.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PushBranchOptions<'a> {
+    /// Push only up to this commit of the branch (`None`: the whole branch).
+    pub revision: Option<&'a str>,
+    /// Remote branch name (`None` keeps the upstream's / the local name).
+    pub target: Option<&'a str>,
+    /// Remote to push to (`None` keeps the upstream's / the default remote).
+    pub remote: Option<&'a str>,
+    /// `git push --force-with-lease`.
+    pub force_with_lease: bool,
+}
+
 /// What an interactive rebase does with one commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -443,6 +456,7 @@ mod cli;
 mod diff;
 mod history;
 mod ignore;
+mod index_writes;
 mod manage;
 mod ops;
 mod patch;
@@ -452,6 +466,7 @@ mod repo;
 mod roots;
 pub mod shelf;
 mod status;
+pub use index_writes::is_own_index_write;
 mod text_encoding;
 mod write;
 
@@ -525,7 +540,13 @@ impl Repo {
     }
     /// Content of `path` at `rev` (default HEAD); `None` if absent there.
     /// `rev` may be any revision git understands, or `":"` / `":0"` for the index.
-    pub fn file_at(&self, path: &Path, rev: Option<&str>, encoding: &'static Encoding) -> IdeResult<Option<String>> {
+    pub fn file_at(
+        &self,
+        path: &Path,
+        rev: Option<&str>,
+        encoding: impl Into<TextEncoding>,
+    ) -> IdeResult<Option<String>> {
+        let encoding = encoding.into();
         let rel = self.rel_path(path)?;
         let repo = self.gix()?;
         Ok(repo::blob_at(&repo, &rel, rev.unwrap_or("HEAD"))?.map(|b| text_encoding::decode(&b, encoding).into_owned()))
@@ -540,8 +561,9 @@ impl Repo {
         path: &Path,
         current: &str,
         selected: &[usize],
-        encoding: &'static Encoding,
+        encoding: impl Into<TextEncoding>,
     ) -> IdeResult<()> {
+        let encoding = encoding.into();
         write::stage_hunks(self, path, current, selected, encoding)
     }
     /// Hunks of `current_text` against HEAD (or the index when `against_index`).
@@ -555,8 +577,9 @@ impl Repo {
         path: &Path,
         current_text: &str,
         against_index: bool,
-        encoding: &'static Encoding,
+        encoding: impl Into<TextEncoding>,
     ) -> IdeResult<Vec<LineHunk>> {
+        let encoding = encoding.into();
         let Ok(rel) = self.rel_path(path) else { return Ok(Vec::new()) };
         if rel.is_empty() || rel == ".git" || rel.starts_with(".git/") {
             return Ok(Vec::new());
@@ -576,13 +599,17 @@ impl Repo {
     }
     /// One entry per line of the current text (`current_text`, or the file on disk).
     /// Lines not yet committed carry an all-zero commit id and author "Not Committed Yet".
+    /// `revision` is the history to blame against (default `HEAD`); the merge view
+    /// blames each side pane on the branch it belongs to (e.g. `MERGE_HEAD`).
     pub fn blame(
         &self,
         path: &Path,
         current_text: Option<&str>,
-        encoding: &'static Encoding,
+        revision: Option<&str>,
+        encoding: impl Into<TextEncoding>,
     ) -> IdeResult<Vec<BlameLine>> {
-        write::blame(self, path, current_text, encoding)
+        let encoding = encoding.into();
+        write::blame(self, path, current_text, revision, encoding)
     }
     /// Commits newest-first in topological order (children before parents).
     ///
@@ -613,7 +640,8 @@ impl Repo {
     }
     /// Unified diff of a file: index↔worktree (`staged == false`, untracked files diff
     /// against /dev/null) or HEAD↔index (`staged == true`). Empty when unchanged.
-    pub fn diff_text(&self, path: &Path, staged: bool, encoding: &'static Encoding) -> IdeResult<String> {
+    pub fn diff_text(&self, path: &Path, staged: bool, encoding: impl Into<TextEncoding>) -> IdeResult<String> {
+        let encoding = encoding.into();
         write::diff_text(self, path, staged, encoding)
     }
 
@@ -632,8 +660,12 @@ impl Repo {
     }
     /// Applies a unified-diff patch to the index (partial staging of hunks/lines).
     /// Zero-context patches (see [`build_partial_patch`]) are accepted.
-    pub fn stage_patch(&self, patch: &str, encoding: &dyn Fn(&Path) -> IdeResult<&'static Encoding>) -> IdeResult<()> {
-        write::stage_patch(self, patch, encoding)
+    pub fn stage_patch<E: Into<TextEncoding>>(
+        &self,
+        patch: &str,
+        encoding: &dyn Fn(&Path) -> IdeResult<E>,
+    ) -> IdeResult<()> {
+        write::stage_patch(self, patch, &|path| encoding(path).map(Into::into))
     }
     /// Discards unstaged changes: tracked paths are restored from the index (staged
     /// changes are kept), untracked files and directories are deleted.
@@ -644,16 +676,16 @@ impl Repo {
     /// `amend` keeps the previous message.
     pub fn commit(&self, message: &str, amend: bool, sign_off: bool) -> IdeResult<String> {
         let options = CommitOptions { amend, sign_off, author: None, run_hooks: true, partial: Vec::new() };
-        write::commit(self, message, &options, &|_| Ok(encoding_rs::UTF_8))
+        write::commit(self, message, &options, &|_| Ok(encoding_rs::UTF_8.into()))
     }
     /// Commits with the Commit Options popup's choices.
-    pub fn commit_with(
+    pub fn commit_with<E: Into<TextEncoding>>(
         &self,
         message: &str,
         options: &CommitOptions,
-        encoding: &dyn Fn(&Path) -> IdeResult<&'static Encoding>,
+        encoding: &dyn Fn(&Path) -> IdeResult<E>,
     ) -> IdeResult<String> {
-        write::commit(self, message, options, encoding)
+        write::commit(self, message, options, &|path| encoding(path).map(Into::into))
     }
     /// Switches to `branch`. With `create`, creates it at HEAD. Without, a remote branch
     /// (`origin/x`) gets a local tracking branch and any other revision is checked out
@@ -779,20 +811,25 @@ impl Repo {
         cancel: &CancellationToken,
         on_output: &dyn Fn(String),
     ) -> IdeResult<()> {
-        write::push_branch(self, branch, revision, None, force_with_lease, cancel, on_output)
+        write::push_branch(
+            self,
+            branch,
+            PushBranchOptions { revision, force_with_lease, ..Default::default() },
+            cancel,
+            on_output,
+        )
     }
-    /// [`Repo::push_branch`] to remote branch `target` instead of the upstream's name (the
-    /// Push dialog's editable target).
+    /// [`Repo::push_branch`] to remote branch `target` (None keeps the upstream's name)
+    /// and/or remote `remote` (None keeps the upstream's remote). The Push dialog's
+    /// editable target and remote picker.
     pub fn push_branch_to(
         &self,
         branch: &str,
-        revision: Option<&str>,
-        target: &str,
-        force_with_lease: bool,
+        options: PushBranchOptions<'_>,
         cancel: &CancellationToken,
         on_output: &dyn Fn(String),
     ) -> IdeResult<()> {
-        write::push_branch(self, branch, revision, Some(target), force_with_lease, cancel, on_output)
+        write::push_branch(self, branch, options, cancel, on_output)
     }
     /// Fast-forwards a local branch that is not checked out to its upstream (Branches ›
     /// Update). Fails when the branch has diverged.
@@ -874,7 +911,7 @@ impl Repo {
     /// Patch of the local changes of `paths` against HEAD (untracked files included).
     pub fn create_patch(&self, paths: &[PathBuf], reverse: bool) -> IdeResult<String> {
         let rel = self.rel_paths(paths)?;
-        Ok(patch::working_patch(self, &rel, reverse)?.0)
+        Ok(patch::working_patch(self, &rel, reverse, true)?.0)
     }
     /// Patch of the changes made by `commits` (oldest first).
     pub fn create_commits_patch(&self, commits: &[String], reverse: bool) -> IdeResult<String> {
@@ -902,7 +939,8 @@ impl Repo {
     }
     /// The versions of a conflicted file with the user's work as `ours`, as IDEA's merge
     /// dialog shows them (sides swapped during a rebase).
-    pub fn merge_versions(&self, path: &Path, encoding: &'static Encoding) -> IdeResult<MergeVersions> {
+    pub fn merge_versions(&self, path: &Path, encoding: impl Into<TextEncoding>) -> IdeResult<MergeVersions> {
+        let encoding = encoding.into();
         let (base, ours, theirs) = self.conflict_versions(path, encoding)?;
         let sides = self.merge_sides()?;
         let (ours, theirs) = if sides.reversed { (theirs, ours) } else { (ours, theirs) };
@@ -916,8 +954,9 @@ impl Repo {
     pub fn conflict_versions(
         &self,
         path: &Path,
-        encoding: &'static Encoding,
+        encoding: impl Into<TextEncoding>,
     ) -> IdeResult<(Option<String>, Option<String>, Option<String>)> {
+        let encoding = encoding.into();
         let rel = self.rel_path(path)?;
         let repo = self.gix()?;
         let stage = |n: u8| -> IdeResult<Option<String>> {

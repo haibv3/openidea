@@ -3,7 +3,7 @@ import type { RunTargetValid } from "@/platform/remoteSettings";
 import { useWorkflowSettings } from "@/platform/workflowSettings";
 import { EmptyState, IconButton, SplitGroup, SplitHandle, SplitPanel, Tabs, type TabItem, T } from "@/ui";
 import { executeAction } from "@/platform/actions";
-import { shortcutLabel } from "@/platform/keymap";
+import { formatBinding, hostBinding, shortcutLabel } from "@/platform/keymap";
 import { ConsoleModel } from "./console";
 import { ConsoleView } from "./ConsoleView";
 import { TerminalConsole } from "./TerminalConsole";
@@ -29,6 +29,7 @@ import {
 } from "./store";
 import { TestTreeView, formatDuration } from "./TestTreeView";
 import { StackTracePanel, closeStackTrace, useStackTraces, type StackTraceTab } from "./stackTrace";
+import { showTomcatUpdate } from "./tomcatUpdate";
 import styles from "./Run.module.css";
 import { tx } from "@/platform/i18n";
 
@@ -51,6 +52,7 @@ export function SessionPanel({ session }: { session: RunSession }) {
   const [wrapOverride, setWrapOverride] = useState<boolean | null>(null);
   const softWrap = wrapOverride ?? defaultWrap;
   const [selectedTest, setSelectedTest] = useState<string | null>(null);
+  const [findOpen, setFindOpen] = useState(false);
   const running = session.status === "running" || session.status === "starting";
   const cwd = runDirectory(session.config.cwd);
 
@@ -93,6 +95,8 @@ export function SessionPanel({ session }: { session: RunSession }) {
           softWrap={softWrap}
           follow={testModel ? false : follow}
           onFollowChange={setFollow}
+          findOpen={findOpen}
+          onFindOpenChange={setFindOpen}
           cwd={cwd}
           onClear={() => clearConsole(session.id)}
           input={
@@ -140,9 +144,26 @@ export function SessionPanel({ session }: { session: RunSession }) {
           disabled={!running}
           onClick={() => void stopSession(session.id)}
         />
+        {session.config.kind === "tomcat" && (
+          <IconButton
+            icon="refresh"
+            title="Update Application"
+            shortcut={shortcutLabel("run.updateApplication")}
+            disabled={!running}
+            onClick={() => showTomcatUpdate(session.id)}
+          />
+        )}
         <div className={styles.toolbarSep} />
         {!rt.terminal && (
           <>
+            <IconButton
+              icon="search"
+              iconSize={14}
+              title="Find…"
+              shortcut={formatBinding(hostBinding("Meta+F"))}
+              pressed={findOpen}
+              onClick={() => setFindOpen((v) => !v)}
+            />
             <IconButton
               icon="arrow-down"
               iconSize={14}

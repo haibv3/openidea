@@ -126,17 +126,12 @@ fn extract_zip(archive: &Path, dest: &Path, cancel: &CancellationToken) -> IdeRe
             io::Read::read_to_string(&mut file, &mut target)?;
             // Checked everywhere: an escaping link is refused even where links cannot be made.
             validate_link(dest, &rel, Path::new(&target))?;
+            let _ = fs::remove_file(&out);
             #[cfg(unix)]
-            {
-                let _ = fs::remove_file(&out);
-                std::os::unix::fs::symlink(target, &out)?;
-            }
-            #[cfg(not(unix))]
-            {
-                // Windows needs privileges for a link, and a file holding the target text
-                // would be worse than nothing: the entry is dropped.
-                let _ = target;
-            }
+            std::os::unix::fs::symlink(&target, &out)?;
+            // Windows can't create symlinks without SeCreateSymbolicLinkPrivilege
+            // (os error 1314), so we drop in-archive links there rather than fail
+            // the whole extraction. Validation above still rejects escapes.
             continue;
         }
         let mut w = File::create(&out)?;
@@ -494,6 +489,11 @@ mod tests {
             assert!(extract(&archive, ArchiveKind::Zip, &dest, "x", &CancellationToken::new()).is_err());
             assert!(fs::symlink_metadata(dest.join("link")).is_err());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn zip_internal_symlink_is_created() {
         // A link inside the archive (e.g. a framework's Versions/Current) still extracts.
         // Only Unix materialises links; Windows drops the entry after checking it.
         #[cfg(unix)]

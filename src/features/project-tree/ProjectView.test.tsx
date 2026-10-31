@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { emitLocalIdeEvent } from "@/platform/ipc";
 import { getContext } from "@/platform/context";
-import { provideEditorService, type EditorService } from "@/workbench/contributions";
+import { provideEditorService, registerProjectViewRoot, type EditorService } from "@/workbench/contributions";
 import { activate } from "./index";
 import { setOsClipboardForTests } from "./clipboard";
 import { MemoryFs, setProjectFsForTests } from "./fs";
@@ -164,6 +164,47 @@ describe("ProjectView", () => {
     expect(getContext().projectViewFocus).toBe(false);
   });
 
+  it("publishes the selected folder or file parent only while the tree has focus", async () => {
+    const { tree, row, rows } = setup();
+    await waitFor(() => expect(rows()).toContain("README.md"));
+    fireEvent.mouseDown(row("src"));
+    tree.focus();
+    expect(getContext().focusedDirectory).toBe(`${ROOT}/src`);
+    fireEvent.keyDown(tree, { key: "ArrowRight" });
+    await waitFor(() => expect(rows()).toContain("App.kt"));
+    fireEvent.mouseDown(row("App.kt"));
+    expect(getContext().focusedDirectory).toBe(`${ROOT}/src`);
+    fireEvent.mouseDown(row("README.md"));
+    expect(getContext().focusedDirectory).toBe(ROOT);
+    fireEvent.blur(tree);
+    expect(getContext().focusedDirectory).toBeUndefined();
+  });
+
+  it("publishes Scratches paths through the same Project tree", async () => {
+    fs.nodes.set("/scratches", { kind: "dir" });
+    fs.nodes.set("/scratches/note.txt", { kind: "file", size: 0 });
+    const remove = registerProjectViewRoot({
+      id: "scratch-test",
+      path: "/scratches",
+      label: "Scratches",
+      icon: "scratches",
+      scope: "scratches",
+    });
+    try {
+      const { tree, row, rows } = setup();
+      await waitFor(() => expect(rows()).toContain("Scratches"));
+      fireEvent.mouseDown(row("Scratches"));
+      tree.focus();
+      expect(getContext().focusedDirectory).toBe("/scratches");
+      fireEvent.keyDown(tree, { key: "ArrowRight" });
+      await waitFor(() => expect(rows()).toContain("note.txt"));
+      fireEvent.mouseDown(row("note.txt"));
+      expect(getContext().focusedDirectory).toBe("/scratches");
+    } finally {
+      act(() => remove());
+    }
+  });
+
   it("renames in IDEA's Rename dialog with Shift+F6, validating conflicts, and undoes with ⌘Z", async () => {
     const { tree, row, rows } = setup();
     await waitFor(() => expect(rows()).toContain("README.md"));
@@ -242,4 +283,12 @@ describe("ProjectView", () => {
     const rendered = within(tree).getAllByRole("treeitem").length;
     expect(rendered).toBeLessThan(80);
   });
+});
+
+it("renders workspace member roots with their own paths, without the settings directory", async () => {
+  fs = new MemoryFs({ "/z/first.txt": "", "/a/second.txt": "", "/workspace/.openidea/workspace.json": "{}" });
+  setProjectFsForTests(fs, "/workspace");
+  initProjectTree("/workspace", "Workspace", ["/z", "/a"]);
+  const { rows } = setup();
+  await waitFor(() => expect(rows()).toEqual(["z/z", "first.txt", "a/a", "second.txt"]));
 });
