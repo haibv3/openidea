@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use crate::layout::{FlexDir, Gravity, HAlign, Node, Size, Style, VAlign, Visibility};
+use crate::layout::{FlexDir, Gravity, HAlign, Node, Size, Style, VAlign};
 use crate::resources::{color_css, theme_attr_css};
 
 // ---------------------------------------------------------------------------
@@ -304,7 +304,7 @@ impl Cursor {
 }
 
 /// Parses `name = value` / positional values from a raw token slice.
-fn parse_named_args(toks: &[TokPos], out: &mut HashMap<String, Val>) {
+fn parse_named_args(toks: &[TokPos], out: &mut HashMap<String, Val>, file: &File, scope: &Scope) {
     let mut cur = Cursor { toks: toks.to_vec(), pos: 0 };
     let mut positional = 0usize;
     while cur.pos < cur.toks.len() {
@@ -318,7 +318,7 @@ fn parse_named_args(toks: &[TokPos], out: &mut HashMap<String, Val>) {
         if cur.pos >= cur.toks.len() {
             break;
         }
-        let val = parse_val(&mut cur);
+        let val = parse_val(&mut cur, file, scope);
         let named = key.is_some();
         out.insert(key.unwrap_or_else(|| format!("@{positional}")), val);
         if !named {
@@ -331,11 +331,11 @@ fn parse_named_args(toks: &[TokPos], out: &mut HashMap<String, Val>) {
 }
 
 /// Parses one value expression from the cursor.
-fn parse_val(cur: &mut Cursor) -> Val {
+fn parse_val(cur: &mut Cursor, file: &File, scope: &Scope) -> Val {
     match cur.peek().cloned() {
         Some(Tok::Punct('-')) => {
             cur.bump();
-            match parse_val(cur) {
+            match parse_val(cur, file, scope) {
                 Val::Num(n) => Val::Num(-n),
                 Val::Dp(n) => Val::Dp(-n),
                 other => other,
@@ -364,14 +364,14 @@ fn parse_val(cur: &mut Cursor) -> Val {
         }
         Some(Tok::Punct('{')) => {
             let (start, end) = cur.group_range('{', '}').unwrap_or((cur.pos, cur.pos));
-            parse_lambda(&cur.toks[start..end])
+            parse_lambda(&cur.toks[start..end], file, scope)
         }
         Some(Tok::Punct('(')) => {
             let (start, end) = cur.group_range('(', ')').unwrap_or((cur.pos, cur.pos));
             let mut inner = Cursor { toks: cur.toks[start..end].to_vec(), pos: 0 };
-            parse_val(&mut inner)
+            parse_val(&mut inner, file, scope)
         }
-        Some(Tok::Ident(id)) => parse_ident_val(cur, &id),
+        Some(Tok::Ident(id)) => parse_ident_val(cur, &id, file, scope),
         Some(other) => {
             cur.bump();
             Val::Unknown(tok_text(&other))
@@ -391,11 +391,11 @@ fn tok_text(t: &Tok) -> String {
 }
 
 /// `{ … }`: composable calls when present, else a leading scalar.
-fn parse_lambda(toks: &[TokPos]) -> Val {
-    let nodes = parse_nodes(toks);
+fn parse_lambda(toks: &[TokPos], file: &File, scope: &Scope) -> Val {
+    let nodes = parse_nodes(toks, file, scope);
     let scalar = if nodes.is_empty() {
         let mut cur = Cursor { toks: toks.to_vec(), pos: 0 };
-        match parse_val(&mut cur) {
+        match parse_val(&mut cur, file, scope) {
             Val::Num(n) => Some(n),
             Val::Dp(n) => Some(n),
             _ => None,
@@ -408,7 +408,7 @@ fn parse_lambda(toks: &[TokPos]) -> Val {
 
 /// Parses an identifier-headed value: Modifier chains, Color, MaterialTheme,
 /// enums, function calls, bare references.
-fn parse_ident_val(cur: &mut Cursor, id: &str) -> Val {
+fn parse_ident_val(cur: &mut Cursor, id: &str, file: &File, scope: &Scope) -> Val {
     match id {
         "true" => {
             cur.bump();
@@ -435,7 +435,7 @@ fn parse_ident_val(cur: &mut Cursor, id: &str) -> Val {
                             args.push(Val::Ident(k.clone()));
                             inner.pos += 2;
                         }
-                        args.push(parse_val(&mut inner));
+                        args.push(parse_val(&mut inner, file, scope));
                         if inner.peek() == Some(&Tok::Punct(',')) {
                             inner.pos += 1;
                         } else {
@@ -473,6 +473,11 @@ fn parse_ident_val(cur: &mut Cursor, id: &str) -> Val {
                 path.push(n);
                 cur.pos += 2;
             }
+            // `MaterialTheme.typography.titleLarge` and `…shapes.small` are not
+            // colours; keep the path so the caller can use the text style.
+            if matches!(path.get(1).map(String::as_str), Some("typography" | "shapes")) {
+                return Val::Ident(path.join("."));
+            }
             let attr = path.last().map(String::as_str).unwrap_or("");
             Val::Color(theme_attr_css(attr).unwrap_or("rgba(0,0,0,0)").to_owned())
         }
@@ -493,7 +498,7 @@ fn parse_ident_val(cur: &mut Cursor, id: &str) -> Val {
                 cur.pos = probe;
                 let (start, end) = cur.group_range('(', ')').unwrap_or((cur.pos, cur.pos));
                 let mut args = HashMap::new();
-                parse_named_args(&cur.toks[start..end], &mut args);
+                parse_named_args(&cur.toks[start..end], &mut args, file, scope);
                 // Arrangement.spacedBy(8.dp)
                 if path.last().map(String::as_str) == Some("spacedBy") {
                     let gap = args.values().find_map(|v| match v {
@@ -543,6 +548,30 @@ fn named_color(name: &str) -> Option<String> {
     })
 }
 
+/// `MaterialTheme.typography.titleLarge` → `(22sp, medium)`; the M3 type
+/// scale, so text without an explicit `fontSize` matches the design system.
+fn typography(path: &str) -> Option<(f32, bool)> {
+    let name = path.rsplit('.').next().unwrap_or(path);
+    Some(match name {
+        "displayLarge" => (57.0, false),
+        "displayMedium" => (45.0, false),
+        "displaySmall" => (36.0, false),
+        "headlineLarge" => (32.0, false),
+        "headlineMedium" => (28.0, false),
+        "headlineSmall" => (24.0, false),
+        "titleLarge" => (22.0, false),
+        "titleMedium" => (16.0, true),
+        "titleSmall" => (14.0, true),
+        "bodyLarge" => (16.0, false),
+        "bodyMedium" => (14.0, false),
+        "bodySmall" => (12.0, false),
+        "labelLarge" => (14.0, true),
+        "labelMedium" => (12.0, true),
+        "labelSmall" => (11.0, true),
+        _ => return None,
+    })
+}
+
 /// `RoundedCornerShape(8.dp)` → 8; `CircleShape` → 999.
 fn shape_radius(val: &Val) -> Option<f32> {
     match val {
@@ -558,6 +587,163 @@ fn shape_radius(val: &Val) -> Option<f32> {
             _ => None,
         }),
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// File scope: composables that can be inlined into a preview
+// ---------------------------------------------------------------------------
+
+/// One composable function declared in the previewed file.
+#[derive(Debug, Clone)]
+struct FunDef {
+    params: Vec<String>,
+    /// Token range of the body (`{ … }`), absolute in the file.
+    body: Option<(usize, usize)>,
+}
+
+/// The previewed file: its tokens plus every top-level function. A `@Preview`
+/// body that calls another composable of the same file is rendered by
+/// inlining that body, the way the preview tooling actually composes it.
+struct File {
+    toks: Vec<TokPos>,
+    funs: HashMap<String, FunDef>,
+}
+
+/// Parameters in scope while building nodes of an inlined function.
+struct Scope {
+    params: HashMap<String, Val>,
+    depth: usize,
+}
+
+impl Scope {
+    fn root() -> Self {
+        Self { params: HashMap::new(), depth: 0 }
+    }
+}
+
+/// How deep a call chain of composables is followed before it degrades to a
+/// placeholder (guards against recursive composables).
+const MAX_INLINE_DEPTH: usize = 4;
+
+/// Indexes every top-level `fun` in the file with its parameter names and body
+/// range. Local functions, lambdas and interfaces are skipped.
+fn index_functions(toks: &[TokPos]) -> HashMap<String, FunDef> {
+    let mut funs = HashMap::new();
+    let mut depth = 0i32;
+    let mut i = 0;
+    while i < toks.len() {
+        match &toks[i].tok {
+            Tok::Punct('{') => depth += 1,
+            Tok::Punct('}') => depth -= 1,
+            Tok::Ident(id) if depth == 0 && id == "fun" => {
+                // `fun [<T>] name ( params ) [: Type] { body }`
+                let mut name_at = i + 1;
+                if toks.get(name_at).map(|t| &t.tok) == Some(&Tok::Punct('<')) {
+                    while name_at < toks.len() && toks[name_at].tok != Tok::Punct('>') {
+                        name_at += 1;
+                    }
+                    name_at += 1;
+                }
+                let Some(Tok::Ident(name)) = toks.get(name_at).map(|t| t.tok.clone()) else {
+                    i += 1;
+                    continue;
+                };
+                let mut paren = name_at + 1;
+                while toks.get(paren).map(|t| &t.tok) == Some(&Tok::Punct('<')) {
+                    while paren < toks.len() && toks[paren].tok != Tok::Punct('>') {
+                        paren += 1;
+                    }
+                    paren += 1;
+                }
+                if let Some(def) = fun_def(toks, paren) {
+                    funs.entry(name).or_insert(def);
+                }
+                i = paren;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    funs
+}
+
+/// Parses `( params ) [: Type] { body }` starting at the opening paren.
+fn fun_def(toks: &[TokPos], open: usize) -> Option<FunDef> {
+    if toks.get(open).map(|t| &t.tok) != Some(&Tok::Punct('(')) {
+        return None;
+    }
+    let mut depth = 1i32;
+    let mut pos = open + 1;
+    let params_start = pos;
+    while depth > 0 {
+        match toks.get(pos)?.tok {
+            Tok::Punct('(') => depth += 1,
+            Tok::Punct(')') => depth -= 1,
+            _ => {}
+        }
+        pos += 1;
+    }
+    let params = param_names(&toks[params_start..pos - 1]);
+    // Skip the optional return type, up to the body or an expression body.
+    while let Some(t) = toks.get(pos) {
+        match t.tok {
+            Tok::Punct('{') | Tok::Punct('=') | Tok::Punct(';') => break,
+            _ => pos += 1,
+        }
+    }
+    if toks.get(pos).map(|t| &t.tok) != Some(&Tok::Punct('{')) {
+        return Some(FunDef { params, body: None });
+    }
+    let start = pos + 1;
+    let mut depth = 1i32;
+    pos += 1;
+    while depth > 0 {
+        match toks.get(pos)?.tok {
+            Tok::Punct('{') => depth += 1,
+            Tok::Punct('}') => depth -= 1,
+            _ => {}
+        }
+        pos += 1;
+    }
+    Some(FunDef { params, body: Some((start, pos - 1)) })
+}
+
+/// `title: String, onDone: () -> Unit` → `["title", "onDone"]`.
+fn param_names(toks: &[TokPos]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    for (i, t) in toks.iter().enumerate() {
+        match &t.tok {
+            Tok::Punct('(') | Tok::Punct('[') | Tok::Punct('<') => depth += 1,
+            Tok::Punct(')') | Tok::Punct(']') | Tok::Punct('>') => depth -= 1,
+            Tok::Ident(name) if depth == 0 && toks.get(i + 1).map(|n| &n.tok) == Some(&Tok::Punct(':')) => {
+                out.push(name.clone());
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Replaces parameters by the arguments a caller passed.
+fn substitute(v: &Val, params: &HashMap<String, Val>) -> Val {
+    match v {
+        Val::Ident(name) if params.contains_key(name) => params[name].clone(),
+        Val::Modifier(ops) => Val::Modifier(
+            ops.iter()
+                .map(|op| ModOp {
+                    name: op.name.clone(),
+                    args: op.args.iter().map(|a| substitute(a, params)).collect(),
+                })
+                .collect(),
+        ),
+        Val::Call { name, args } => Val::Call {
+            name: name.clone(),
+            args: Box::new(args.iter().map(|(k, a)| (k.clone(), substitute(a, params))).collect()),
+        },
+        other => other.clone(),
     }
 }
 
@@ -593,7 +779,8 @@ pub struct Frame {
 /// an empty list (the caller shows a friendly empty state, not an error).
 pub fn scan(src: &str) -> Result<Vec<Frame>, String> {
     let toks = lex(src)?;
-    let mut cur = Cursor { toks, pos: 0 };
+    let file = File { funs: index_functions(&toks), toks };
+    let mut cur = Cursor { toks: file.toks.clone(), pos: 0 };
     let mut specs: Vec<PreviewSpec> = Vec::new();
 
     while cur.pos < cur.toks.len() {
@@ -622,7 +809,7 @@ pub fn scan(src: &str) -> Result<Vec<Frame>, String> {
             let Some((start, end)) = cur.group_range('(', ')') else {
                 return Err("unbalanced @Preview arguments".into());
             };
-            parse_named_args(&cur.toks[start..end], &mut args);
+            parse_named_args(&cur.toks[start..end], &mut args, &file, &Scope::root());
         }
         // Find the annotated function: annotations / modifiers may intervene.
         let mut probe = cur.pos;
@@ -703,7 +890,7 @@ pub fn scan(src: &str) -> Result<Vec<Frame>, String> {
             (None, i, total) if total > 1 => format!("{} · {}", spec.fun_name, i + 1),
             (None, _, _) => spec.fun_name.clone(),
         };
-        frames.push(build_frame(&cur.toks, spec.fun_index, &caption, spec)?);
+        frames.push(build_frame(&file, spec.fun_index, &caption, spec)?);
     }
     Ok(frames)
 }
@@ -715,7 +902,8 @@ fn num_arg(args: &HashMap<String, Val>, key: &str) -> Option<f32> {
     }
 }
 
-fn build_frame(toks: &[TokPos], fun_index: usize, caption: &str, spec: &PreviewSpec) -> Result<Frame, String> {
+fn build_frame(file: &File, fun_index: usize, caption: &str, spec: &PreviewSpec) -> Result<Frame, String> {
+    let toks = &file.toks;
     // fun name ( … ) [: Type] { body }
     let mut pos = fun_index;
     while matches!(toks.get(pos).map(|t| &t.tok), Some(Tok::Ident(_))) {
@@ -763,7 +951,7 @@ fn build_frame(toks: &[TokPos], fun_index: usize, caption: &str, spec: &PreviewS
     };
     let root = body.map(|(start, end)| {
         let mut n = Node { kind: "Frame".into(), ..Default::default() };
-        n.children = parse_nodes(&toks[start..end]);
+        n.children = parse_nodes(&file.toks[start..end], &file, &Scope::root());
         n
     });
     Ok(Frame {
@@ -783,13 +971,13 @@ fn build_frame(toks: &[TokPos], fun_index: usize, caption: &str, spec: &PreviewS
 const CONTROL_KEYWORDS: [&str; 9] = ["if", "else", "for", "while", "when", "return", "repeat", "try", "catch"];
 
 /// Parses a sequence of composable calls into nodes.
-fn parse_nodes(toks: &[TokPos]) -> Vec<Node> {
+fn parse_nodes(toks: &[TokPos], file: &File, scope: &Scope) -> Vec<Node> {
     let mut cur = Cursor { toks: toks.to_vec(), pos: 0 };
     let mut out = Vec::new();
     while cur.pos < cur.toks.len() {
         let before = cur.pos;
-        if let Some(node) = parse_call(&mut cur) {
-            out.push(node);
+        if let Some(nodes) = parse_call(&mut cur, file, scope) {
+            out.extend(nodes);
         }
         if cur.pos == before {
             // Always make progress (unbalanced groups, stray tokens, …).
@@ -799,8 +987,9 @@ fn parse_nodes(toks: &[TokPos]) -> Vec<Node> {
     out
 }
 
-/// Parses one `Name(args) { children }` call; returns None for non-calls.
-fn parse_call(cur: &mut Cursor) -> Option<Node> {
+/// Parses one `Name(args) { children }` call; returns None for non-calls. A
+/// call to a composable of the same file expands to its body's nodes.
+fn parse_call(cur: &mut Cursor, file: &File, scope: &Scope) -> Option<Vec<Node>> {
     let Tok::Ident(name) = cur.peek()? else {
         cur.bump();
         return None;
@@ -821,7 +1010,7 @@ fn parse_call(cur: &mut Cursor) -> Option<Node> {
     if cur.peek_at(1) == Some(&Tok::Punct('(')) {
         cur.pos += 1; // land ON '(' — group_range expects the cursor there
         let (start, end) = cur.group_range('(', ')')?;
-        parse_named_args(&cur.toks[start..end], &mut args);
+        parse_named_args(&cur.toks[start..end], &mut args, file, scope);
     } else if cur.peek_at(1) == Some(&Tok::Punct('{')) {
         // Paren-less trailing-lambda call: `Column { … }`.
         cur.pos += 1;
@@ -833,14 +1022,33 @@ fn parse_call(cur: &mut Cursor) -> Option<Node> {
     let mut children: Vec<Node> = Vec::new();
     if cur.peek() == Some(&Tok::Punct('{')) {
         if let Some((s, e)) = cur.group_range('{', '}') {
-            children = parse_nodes(&cur.toks[s..e]);
+            children = parse_nodes(&cur.toks[s..e], file, scope);
         }
     }
     // content = { … } lambdas also supply children.
     if let Some(Val::Lambda(nodes, _)) = args.get("content") {
         children = nodes.clone();
     }
-    Some(build_composable(&name, &args, children))
+    Some(build_nodes(&name, &args, children, file, scope))
+}
+
+/// Builds the nodes for one call: a known composable of this file is inlined,
+/// anything else becomes a single node (or a placeholder).
+fn build_nodes(name: &str, args: &HashMap<String, Val>, children: Vec<Node>, file: &File, scope: &Scope) -> Vec<Node> {
+    let bound: HashMap<String, Val> = args.iter().map(|(k, v)| (k.clone(), substitute(v, &scope.params))).collect();
+    if let Some(def) = file.funs.get(name) {
+        if let (Some((start, end)), true) = (def.body, scope.depth < MAX_INLINE_DEPTH) {
+            let mut params = HashMap::new();
+            for (i, param) in def.params.iter().enumerate() {
+                if let Some(v) = bound.get(param).or_else(|| bound.get(&format!("@{i}"))) {
+                    params.insert(param.clone(), v.clone());
+                }
+            }
+            let inner = Scope { params, depth: scope.depth + 1 };
+            return parse_nodes(&file.toks[start..end], file, &inner);
+        }
+    }
+    vec![build_composable(name, &bound, children)]
 }
 
 fn get_f32(args: &HashMap<String, Val>, key: &str) -> Option<f32> {
@@ -1060,7 +1268,16 @@ fn build_composable(name: &str, args: &HashMap<String, Val>, children: Vec<Node>
                                 gravity.h = HAlign::End;
                             }
                         }
-                        "Center" | "SpaceBetween" | "SpaceEvenly" | "SpaceAround" => {
+                        "SpaceBetween" | "SpaceEvenly" | "SpaceAround" => {
+                            // `justify-content:space-between` — the closest CSS
+                            // distribution; centring would move the content.
+                            if column {
+                                gravity.v = VAlign::Fill;
+                            } else {
+                                gravity.h = HAlign::Fill;
+                            }
+                        }
+                        "Center" => {
                             if column {
                                 gravity.v = VAlign::Center;
                             } else {
@@ -1120,6 +1337,14 @@ fn build_composable(name: &str, args: &HashMap<String, Val>, children: Vec<Node>
                 _ => {}
             }
             style.font_size = get_f32(args, "fontSize");
+            if let Some(Val::Ident(path)) = args.get("style") {
+                if let Some((size, medium)) = typography(path) {
+                    style.font_size = style.font_size.or(Some(size));
+                    if medium {
+                        style.bold = Some(true);
+                    }
+                }
+            }
             style.fg = get_color(args, "color");
             if let Some(Val::Ident(path)) = args.get("fontWeight") {
                 let last = path.rsplit('.').next().unwrap_or(path);
@@ -1177,8 +1402,18 @@ fn build_composable(name: &str, args: &HashMap<String, Val>, children: Vec<Node>
         "Spacer" => node.kind = "Space".into(),
         "Divider" | "HorizontalDivider" | "VerticalDivider" => {
             node.kind = "Divider".into();
-            style.vertical = name == "VerticalDivider";
-            style.fg = get_color(args, "color");
+            let vertical = name == "VerticalDivider";
+            style.vertical = vertical;
+            let thickness = get_f32(args, "thickness").unwrap_or(1.0);
+            style.bg_color = get_color(args, "color").or_else(|| Some(crate::resources::M3_OUTLINE_VARIANT.to_owned()));
+            // Material dividers span the container across their short axis.
+            if vertical {
+                style.width = Some(Size::Px(thickness));
+                style.height = Some(Size::Match);
+            } else {
+                style.width = Some(Size::Match);
+                style.height = Some(Size::Px(thickness));
+            }
         }
         "Checkbox" | "Switch" | "RadioButton" => {
             node.kind = if name == "Checkbox" { "CheckBox".into() } else { name.into() };
@@ -1209,14 +1444,18 @@ fn build_composable(name: &str, args: &HashMap<String, Val>, children: Vec<Node>
         }
         "LazyColumn" | "LazyRow" | "LazyVerticalGrid" => {
             node.kind = if name == "LazyRow" { "LazyRow".into() } else { "LazyColumn".into() };
-            for i in 0..3 {
-                let mut item = Node::placeholder(format!("item {}", i + 1));
-                item.style.width = Some(Size::Match);
-                item.style.height = Some(Size::Px(48.0));
-                item.style.visibility = Visibility::Visible;
-                node.children.push(item);
+            style.flex_dir = Some(if name == "LazyRow" { FlexDir::Row } else { FlexDir::Column });
+            if children.is_empty() {
+                // `items(list)` cannot be expanded without the data.
+                for i in 0..3 {
+                    let mut item = Node::placeholder(format!("item {}", i + 1));
+                    item.style.width = Some(Size::Match);
+                    item.style.height = Some(Size::Px(48.0));
+                    node.children.push(item);
+                }
+                node.style = style;
+                return node;
             }
-            return node;
         }
         other => {
             node.kind = "Placeholder".into();

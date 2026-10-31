@@ -47,7 +47,7 @@ export!(AndroidPreview);
 
 /// One XML layout file → one screen with the resolved node roots.
 fn layout_screen(request: &PreviewRequest) -> Result<Screen, String> {
-    let source = hosts::res_source(&request.path);
+    let source = hosts::res_source(&request.project_path, &request.path);
     let res = Resources::new(&*source);
     let mut roots: Vec<Node> = layout::build(&request.content, &res)?;
     // Resolve Relative/ConstraintLayout rules into absolute child positions
@@ -55,7 +55,7 @@ fn layout_screen(request: &PreviewRequest) -> Result<Screen, String> {
     for root in &mut roots {
         layout::resolve_positions(root, layout::DEVICE_W, layout::DEVICE_H);
     }
-    Ok(Screen { caption: None, roots, width: None, height: None, bg: None })
+    Ok(Screen { caption: None, roots, width: None, height: None, bg: None, stretch_roots: true })
 }
 
 /// Every `@Preview` function in one Kotlin file → one screen per frame.
@@ -72,6 +72,7 @@ fn compose_screens(request: &PreviewRequest) -> Result<Vec<Screen>, String> {
             width: f.width,
             height: f.height,
             bg: if f.show_background { f.bg_color } else { Some("transparent".to_owned()) },
+            stretch_roots: false,
         })
         .collect())
 }
@@ -139,6 +140,94 @@ fun Two() {
         assert!(out.html.contains("One"));
         assert!(out.html.contains("Two"));
         assert_eq!(out.html.matches("class=\"ap-screen\"").count(), 2);
+    }
+
+    #[test]
+    fn preview_frame_sizes_survive_the_device_toolbar() {
+        let request = PreviewRequest {
+            path: "app/src/main/java/MainActivity.kt".to_owned(),
+            project_path: "/p".to_owned(),
+            decl: "compose".to_owned(),
+            content: r#"
+@Preview(widthDp = 320, heightDp = 200)
+@Composable
+fun Sized() {
+    Text("Sized")
+}
+
+@Preview
+@Composable
+fun Free() {
+    Text("Free")
+}
+"#
+            .to_owned(),
+        };
+        let out = AndroidPreview::render_preview(request).unwrap();
+        // The pinned frame keeps both axes; the free one follows the toolbar.
+        assert!(out.html.contains("data-fixed-w data-fixed-h"));
+        assert!(out.html.contains("width:320px;height:200px;"));
+        assert_eq!(out.html.matches("class=\"ap-screen\"").count(), 2);
+        assert!(out.html.contains("320×200 dp"));
+        // Compose roots are content-sized, not stretched to the device.
+        assert!(!out.html.contains("width:100%;height:100%;overflow:hidden;"));
+    }
+
+    #[test]
+    fn widgets_get_material_defaults() {
+        let request = PreviewRequest {
+            path: "app/src/main/res/layout/x.xml".to_owned(),
+            project_path: "/p".to_owned(),
+            decl: "layout-xml".to_owned(),
+            content: r#"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+    <Button android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Go"/>
+    <CheckBox android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Done"/>
+</LinearLayout>
+"#
+            .to_owned(),
+        };
+        let out = AndroidPreview::render_preview(request).unwrap();
+        // Filled M3 button: primary background, pill radius, 40 dp minimum.
+        assert!(out.html.contains("background:#6750A4;border-radius:20px"));
+        assert!(out.html.contains("min-height:40px"));
+        assert!(out.html.contains("color:#FFFFFF;font-size:14px;font-weight:500"));
+        // A checkbox draws a box, not a disabled native input.
+        assert!(out.html.contains("class=\"ap-box\""));
+        assert!(!out.html.contains("type=\"checkbox\""));
+    }
+
+    #[test]
+    fn button_labels_inherit_the_content_colour() {
+        // Compose `Button { Text(…) }`: the label takes the button's content
+        // colour (`onPrimary`, then `primary` for outlined/text buttons), not
+        // the page's body colour.
+        let request = PreviewRequest {
+            path: "app/src/main/java/MainActivity.kt".to_owned(),
+            project_path: "/p".to_owned(),
+            decl: "compose".to_owned(),
+            content: r#"
+@Preview
+@Composable
+fun P() {
+    Column {
+        Button(onClick = {}) { Text("Save") }
+        OutlinedButton(onClick = {}) { Text("Cancel") }
+        Text("Body")
+    }
+}
+"#
+            .to_owned(),
+        };
+        let out = AndroidPreview::render_preview(request).unwrap();
+        // The label span inherits the button's content colour…
+        assert!(out.html.contains(r#"color:#FFFFFF;white-space:pre-wrap;">Save"#), "{}", out.html);
+        assert!(out.html.contains(r#"color:#6750A4;white-space:pre-wrap;">Cancel"#), "{}", out.html);
+        // …and the box carries `labelLarge`, so unstyled content inherits it.
+        assert!(out.html.contains("font-size:14px;font-weight:500;"), "{}", out.html);
+        // Plain text keeps the theme foreground.
+        assert!(out.html.contains(r#"color:var(--ap-fg);white-space:pre-wrap;">Body"#), "{}", out.html);
     }
 
     #[test]

@@ -82,6 +82,7 @@ pub const M3_ON_SURFACE: &str = "#1D1B20";
 pub const M3_SURFACE_VARIANT: &str = "#E7E0EC";
 pub const M3_ON_SURFACE_VARIANT: &str = "#49454F";
 pub const M3_OUTLINE: &str = "#79747E";
+pub const M3_OUTLINE_VARIANT: &str = "#CAC4D0";
 pub const M3_ERROR: &str = "#B3261E";
 
 /// `?attr/…` / `?android:attr/…` → a default light-theme color.
@@ -262,21 +263,35 @@ impl<'a> Resources<'a> {
             layout_dirs: Vec::new(),
             drawable_dirs: Vec::new(),
         };
-        for entry in source.list("") {
-            if entry.starts_with("values") {
-                for file in source.list(&entry) {
-                    if file.ends_with(".xml") {
-                        if let Some(text) = source.read(&format!("{entry}/{file}")) {
-                            res.load_values(&text);
-                        }
+        // Only the configurations the default preview shows: `values` plus
+        // API-level variants. `values-night`, `values-fr`, `values-w600dp`…
+        // describe other configurations and must not override the base table.
+        let mut values_dirs: Vec<(u32, String)> =
+            source.list("").into_iter().filter_map(|entry| values_dir_version(&entry).map(|v| (v, entry))).collect();
+        // Base first, then ascending API level: the newest applicable wins.
+        values_dirs.sort();
+        for (_, entry) in values_dirs {
+            for file in source.list(&entry) {
+                if file.ends_with(".xml") {
+                    if let Some(text) = source.read(&format!("{entry}/{file}")) {
+                        res.load_values(&text);
                     }
                 }
-            } else if entry.starts_with("layout") {
+            }
+        }
+        for entry in source.list("") {
+            if values_dir_version(&entry).is_some() {
+                continue;
+            }
+            if entry.starts_with("layout") {
                 res.layout_dirs.push(entry);
             } else if entry.starts_with("drawable") {
                 res.drawable_dirs.push(entry);
             }
         }
+        // `layout` itself first, so unqualified includes win over -land/-sw600dp.
+        res.layout_dirs.sort_by_key(|d| (d != "layout", d.clone()));
+        res.drawable_dirs.sort_by_key(|d| (d != "drawable", d.clone()));
         res
     }
 
@@ -447,6 +462,24 @@ impl<'a> Resources<'a> {
 
 fn color_from_aarrggbb(v: &str) -> String {
     color_css(v).unwrap_or_else(|| "#000000".to_owned())
+}
+
+/// API level of a `values` directory the default preview applies, `None` for
+/// other configurations (`values-night`, `values-fr`, `values-w600dp`, …).
+fn values_dir_version(dir: &str) -> Option<u32> {
+    let mut parts = dir.split('-');
+    if parts.next() != Some("values") {
+        return None;
+    }
+    let mut version = 0;
+    for qualifier in parts {
+        let level = qualifier.strip_prefix('v')?;
+        if level.is_empty() || !level.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        version = version.max(level.parse().ok()?);
+    }
+    Some(version)
 }
 
 fn parse_bool(raw: &str) -> Option<bool> {
@@ -773,5 +806,34 @@ mod tests {
         assert_eq!(theme_attr_css("?android:attr/textColorPrimary"), Some(M3_ON_SURFACE));
         assert_eq!(theme_attr_css("?colorOnSurfaceVariant"), Some(M3_ON_SURFACE_VARIANT));
         assert_eq!(theme_attr_css("?attr/nopeNope"), None);
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn only_default_configuration_values_are_loaded() {
+        // Night and locale variants must not override the base tables: the
+        // preview shows the default light configuration.
+        assert_eq!(values_dir_version("values"), Some(0));
+        assert_eq!(values_dir_version("values-v21"), Some(21));
+        assert_eq!(values_dir_version("values-v21-v31"), Some(31));
+        assert_eq!(values_dir_version("values-night"), None);
+        assert_eq!(values_dir_version("values-night-v31"), None);
+        assert_eq!(values_dir_version("values-vi"), None);
+        assert_eq!(values_dir_version("values-w600dp"), None);
+        assert_eq!(values_dir_version("layout"), None);
+    }
+
+    #[test]
+    fn newer_api_values_win_and_night_is_ignored() {
+        let src = MemorySource::new()
+            .file("values/colors.xml", r##"<resources><color name="accent">#FF111111</color></resources>"##)
+            .file("values-v21/colors.xml", r##"<resources><color name="accent">#FF222222</color></resources>"##)
+            .file("values-night/colors.xml", r##"<resources><color name="accent">#FFFFFFFF</color></resources>"##);
+        let res = Resources::new(&src);
+        assert_eq!(res.color("@color/accent", 0).as_deref(), Some("#222222"));
     }
 }

@@ -619,4 +619,35 @@ fn android_preview_plugin_renders_layouts() {
     let out = f.host.render_preview("android-preview", request, f.inv()).unwrap();
     assert!(out.html.contains("Hi from the layout"), "{}", out.html);
     assert!(out.html.contains("class=\"ap-screen\""), "{}", out.html);
+
+    // Resources come from the module's `res/` through the host file imports,
+    // and ConstraintLayout rules are read from the `app:` namespace.
+    let res = f.project.join("app/src/main/res");
+    std::fs::create_dir_all(res.join("values")).unwrap();
+    std::fs::write(
+        res.join("values/strings.xml"),
+        r#"<resources><string name="app_name">From values</string></resources>"#,
+    )
+    .unwrap();
+    let request = PreviewRequest {
+        path: res.join("layout/main.xml").to_string_lossy().into_owned(),
+        project_path: "app/src/main/res/layout/main.xml".into(),
+        decl: "layout-xml".into(),
+        content: r#"<androidx.constraintlayout.widget.ConstraintLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="16dp">
+    <androidx.constraintlayout.widget.Guideline android:id="@+id/rail"
+        android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:orientation="vertical" app:layout_constraintGuide_begin="72dp"/>
+    <TextView android:layout_width="0dp" android:layout_height="wrap_content"
+        android:text="@string/app_name"
+        app:layout_constraintStart_toEndOf="@id/rail" app:layout_constraintEnd_toEndOf="parent"/>
+</androidx.constraintlayout.widget.ConstraintLayout>"#
+            .into(),
+    };
+    let out = f.host.render_preview("android-preview", request, f.inv()).unwrap();
+    assert!(out.html.contains("From values"), "string resource unresolved: {}", out.html);
+    // Guideline at 72 dp + the parent's 16 dp padding.
+    assert!(out.html.contains("left:88px"), "app: constraint ignored: {}", out.html);
 }

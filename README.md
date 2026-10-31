@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/l0ng-ai/openidea/releases/latest"><b>Download</b></a>
+  <a href="https://github.com/haibv3/openidea/releases/latest"><b>Download</b></a>
   &nbsp;·&nbsp;
   <a href="#benchmark">Benchmark</a>
   &nbsp;·&nbsp;
@@ -57,6 +57,13 @@ pnpm tauri dev
 ```
 
 Rust 1.96, Node 22, pnpm and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+
+Automatic updates use `haibv3/openidea` release manifests. To publish signed
+updates, configure `TAURI_SIGNING_PRIVATE_KEY` (and, if applicable,
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD`) in the repository's GitHub Actions secrets.
+The private key must match `plugins.updater.pubkey` in `src-tauri/tauri.conf.json`;
+without signed bundles, the release workflow does not publish `latest.json`.
+`OPENIDEA_UPDATE_ENDPOINT` can override the default endpoint at runtime.
 
 Native notebook execution tests are opt-in and need two distinct Python environments
 with `ipykernel` installed:

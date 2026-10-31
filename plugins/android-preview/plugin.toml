@@ -1,9 +1,28 @@
 id = "android-preview"
 name = "Android Preview"
-version = "0.1.0"
+version = "0.2.0"
 description = "Live previews for Android XML layouts and Jetpack Compose @Preview functions, rendered like Android Studio's preview pane."
 authors = ["OpenIDEA contributors"]
 change-notes = """
+0.2.0 — accuracy pass against Android Studio:
+- ConstraintLayout rules are read from the `app:` namespace (guidelines,
+  dimension ratios, editor-absolute positions), and wrap_content
+  Relative/Constraint containers are measured from their solved children
+  instead of collapsing.
+- Absolute children respect the parent's padding; solved margins are no longer
+  applied twice.
+- Material 3 default appearance for buttons, check/radio boxes, switches,
+  progress/seek bars, images, cards, chips, toolbars and FABs; content without
+  its own style inherits the container's colour and type scale (Compose
+  `LocalContentColor`, so `Button { Text(…) }` is onPrimary/labelLarge).
+- AppCompat/Material widget classes (AppCompatButton, MaterialCardView,
+  SwitchCompat, TextInputEditText, …) preview as their base widget.
+- Layout roots honour their declared size; `layout_alignBaseline`,
+  `layout_gravity` on flex children and `values-night`/locale filtering added.
+- Compose: a @Preview that calls another composable of the file now renders
+  that body (parameters substituted), MaterialTheme.typography sets the type
+  scale, dividers, arrangements and fixed widthDp/heightDp frames are correct,
+  and preview roots wrap their content like a ComposeView.
 0.1.0 — first release: renders Android XML layout files (LinearLayout, FrameLayout,
 RelativeLayout, ConstraintLayout subset, ScrollView, GridLayout, CardView, common
 widgets, resources, tools: overrides and includes) and Jetpack Compose @Preview

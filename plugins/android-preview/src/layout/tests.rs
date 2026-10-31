@@ -349,3 +349,93 @@ fn gone_children_are_marked() {
     assert_eq!(root.children[0].style.visibility, Visibility::Gone);
     assert_eq!(root.children[1].style.visibility, Visibility::Invisible);
 }
+
+#[test]
+fn constraint_rules_come_from_the_app_namespace() {
+    // Real layouts put ConstraintLayout rules in `app:`; ignoring them collapses
+    // every child onto the parent's origin.
+    let mut root = one(r#"<androidx.constraintlayout.widget.ConstraintLayout
+                xmlns:app="http://schemas.android.com/apk/res-auto"
+                android:layout_width="400dp" android:layout_height="300dp" android:padding="16dp">
+            <androidx.constraintlayout.widget.Guideline android:id="@+id/rail"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:orientation="vertical" app:layout_constraintGuide_begin="72dp"/>
+            <View android:layout_width="0dp" android:layout_height="40dp"
+                app:layout_constraintStart_toEndOf="@id/rail" app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="parent"/>
+            <View android:layout_width="0dp" android:layout_height="20dp"
+                app:layout_constraintWidth_percent="0.5"
+                app:layout_constraintStart_toStartOf="parent" app:layout_constraintTop_toTopOf="parent"/>
+        </androidx.constraintlayout.widget.ConstraintLayout>"#);
+    resolve_positions(&mut root, DEVICE_W, DEVICE_H);
+    // The guideline is an anchor, not a drawn box.
+    assert!(root.children[0].style.con.is_guideline());
+    assert_eq!(
+        root.children[1].style.pos,
+        Some(Pos { left: Some(72.0), top: Some(0.0), right: Some(0.0), bottom: None })
+    );
+    // 0.5 of the 400 dp parent, not of the device.
+    assert_eq!(root.children[2].style.width, Some(Size::Percent(50.0)));
+}
+
+#[test]
+fn wrap_content_absolute_container_is_measured() {
+    // A wrap_content ConstraintLayout/RelativeLayout has to end up with a real
+    // size: absolutely positioned children cannot measure it in CSS, and a
+    // centre rule must land inside the content, not the device.
+    let mut root = one(r#"<RelativeLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:padding="12dp">
+            <CheckBox android:id="@+id/done" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:layout_alignParentStart="true"
+                android:layout_centerVertical="true"/>
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:layout_toEndOf="@id/done" android:text="One line"/>
+        </RelativeLayout>"#);
+    resolve_positions(&mut root, DEVICE_W, DEVICE_H);
+    let h = match root.style.height {
+        Some(Size::Px(v)) => v,
+        other => panic!("wrap height not pinned: {other:?}"),
+    };
+    assert!(h > 40.0 && h < 100.0, "height {h} should wrap the one-line row");
+    // Centred vertically inside that 56-ish box, not in an 891 dp device.
+    let top = root.children[0].style.pos.unwrap().top.unwrap();
+    assert!(top < 20.0, "centred checkbox top {top}");
+    // The title starts after the checkbox (wrap estimate 32 wide).
+    assert_eq!(root.children[1].style.pos.unwrap().left, Some(32.0));
+}
+
+#[test]
+fn appcompat_and_material_widgets_map_to_base_kinds() {
+    let root = one(r#"<LinearLayout android:orientation="vertical">
+            <androidx.appcompat.widget.AppCompatButton android:text="Go"/>
+            <com.google.android.material.button.MaterialButton android:text="Go"/>
+            <com.google.android.material.card.MaterialCardView/>
+            <androidx.appcompat.widget.SwitchCompat/>
+            <com.google.android.material.textfield.TextInputEditText android:hint="Name"/>
+            <com.google.android.material.floatingactionbutton.FloatingActionButton/>
+        </LinearLayout>"#);
+    let kinds: Vec<&str> = root.children.iter().map(|c| c.kind.as_str()).collect();
+    assert_eq!(kinds, ["Button", "Button", "CardView", "Switch", "EditText", "FloatingActionButton"]);
+}
+
+#[test]
+fn relative_baseline_and_editor_positions() {
+    let mut root = one(r#"<RelativeLayout android:layout_width="200dp" android:layout_height="100dp">
+            <TextView android:id="@+id/title" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:textSize="20sp" android:text="Title"/>
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:textSize="12sp" android:text="12:00" android:layout_alignParentEnd="true"
+                android:layout_alignBaseline="@id/title"/>
+        </RelativeLayout>"#);
+    resolve_positions(&mut root, DEVICE_W, DEVICE_H);
+    // Baselines coincide: the smaller text sits (20-12)*0.8 = 6.4 px lower.
+    let top = root.children[1].style.pos.unwrap().top.unwrap();
+    assert!((top - 6.4).abs() < 0.01, "baseline offset {top}");
+
+    let mut root = one(r#"<ConstraintLayout android:layout_width="200dp" android:layout_height="100dp">
+            <View android:layout_width="30dp" android:layout_height="30dp"
+                android:layout_editor_absoluteX="40dp" android:layout_editor_absoluteY="25dp"/>
+        </ConstraintLayout>"#);
+    resolve_positions(&mut root, DEVICE_W, DEVICE_H);
+    assert_eq!(root.children[0].style.pos, Some(Pos { left: Some(40.0), top: Some(25.0), right: None, bottom: None }));
+}

@@ -447,3 +447,103 @@ fn imports_constant_is_valid_kotlin() {
     // Sanity: the IMPORTS snippet used by other tests lexes cleanly.
     assert!(scan(IMPORTS).unwrap().is_empty());
 }
+
+#[test]
+fn preview_renders_a_composable_called_from_the_file() {
+    // Android Studio renders the preview by invoking the function: a preview
+    // that delegates to another composable must show that composable's body,
+    // not a placeholder named after the call.
+    let f = one_frame(
+        r#"@Composable
+fun NoteEditor(title: String) {
+    Column {
+        Text(text = title)
+        Button(onClick = {}) { Text("Save") }
+    }
+}
+
+@Preview
+@Composable
+private fun NoteEditorPreview() {
+    NoteEditor(title = "New note")
+}"#,
+    );
+    let nodes = f.root.unwrap().children;
+    assert_eq!(nodes.len(), 1, "one Column, inlined from NoteEditor");
+    let column = &nodes[0];
+    assert_eq!(column.kind, "LinearLayout");
+    // `title` is bound to the caller's string argument.
+    assert_eq!(column.children[0].text.as_deref(), Some("New note"));
+    assert_eq!(column.children[1].kind, "Button");
+}
+
+#[test]
+fn recursive_composables_stop_at_the_depth_limit() {
+    let frames = scan(
+        r#"@Composable
+fun Loop() {
+    Loop()
+}
+
+@Preview
+@Composable
+fun P() {
+    Loop()
+}"#,
+    )
+    .expect("scan");
+    assert_eq!(frames.len(), 1);
+}
+
+#[test]
+fn material_typography_sets_the_text_scale() {
+    let f = one_frame(
+        r#"@Preview
+@Composable
+fun P() {
+    Column {
+        Text("Title", style = MaterialTheme.typography.titleLarge)
+        Text("Body", style = MaterialTheme.typography.bodyMedium)
+        Text("Color", color = MaterialTheme.colorScheme.primary)
+    }
+}"#,
+    );
+    let column = &f.root.unwrap().children[0];
+    assert_eq!(column.children[0].style.font_size, Some(22.0));
+    assert_eq!(column.children[1].style.font_size, Some(14.0));
+    // `colorScheme.primary` is still a colour, not a typography token.
+    assert_eq!(column.children[2].style.fg.as_deref(), Some("#6750A4"));
+}
+
+#[test]
+fn dividers_span_their_container() {
+    let f = one_frame(
+        r#"@Preview
+@Composable
+fun P() {
+    Column {
+        Divider(color = Color(0xFFE8E0EB), thickness = 2.dp)
+    }
+}"#,
+    );
+    let divider = &f.root.unwrap().children[0].children[0];
+    assert_eq!(divider.kind, "Divider");
+    assert_eq!(divider.style.width, Some(Size::Match));
+    assert_eq!(divider.style.height, Some(Size::Px(2.0)));
+    assert_eq!(divider.style.bg_color.as_deref(), Some("#E8E0EB"));
+}
+
+#[test]
+fn arrangements_distribute_instead_of_centring() {
+    let f = one_frame(
+        r#"@Preview
+@Composable
+fun P() {
+    Column(verticalArrangement = Arrangement.SpaceBetween) { Text("a") }
+    Row(horizontalArrangement = Arrangement.SpaceEvenly) { Text("b") }
+}"#,
+    );
+    let nodes = f.root.unwrap().children;
+    assert_eq!(nodes[0].style.gravity.unwrap().v, VAlign::Fill);
+    assert_eq!(nodes[1].style.gravity.unwrap().h, HAlign::Fill);
+}

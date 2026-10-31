@@ -91,6 +91,7 @@ pub struct RelRules {
     pub align_bottom: Option<String>,
     pub align_start: Option<String>,
     pub align_end: Option<String>,
+    pub align_baseline: Option<String>,
     pub parent_start: bool,
     pub parent_end: bool,
     pub parent_top: bool,
@@ -120,6 +121,10 @@ pub struct ConRules {
     pub guide_begin: Option<f32>,
     pub guide_end: Option<f32>,
     pub guide_percent: Option<f32>,
+    /// `layout_editor_absoluteX/Y`: the position the design tool pinned when
+    /// the view has no constraints.
+    pub editor_x: Option<f32>,
+    pub editor_y: Option<f32>,
 }
 
 impl ConRules {
@@ -254,6 +259,33 @@ fn id_ref(raw: &str) -> String {
     raw.trim().trim_start_matches("@+id/").trim_start_matches("@id/").to_owned()
 }
 
+/// Maps a concrete widget class to the kind the renderer understands, so
+/// `AppCompatButton`, `MaterialButton`, `MaterialCardView`, `SwitchCompat`…
+/// preview like their base widget instead of an empty box.
+fn canonical_kind(tag: &str) -> String {
+    let kind = match tag {
+        "AppCompatButton" | "MaterialButton" | "ButtonCompat" => "Button",
+        "AppCompatTextView" | "MaterialTextView" => "TextView",
+        "AppCompatImageView" | "ShapeableImageView" => "ImageView",
+        "AppCompatImageButton" => "ImageButton",
+        "AppCompatCheckBox" | "MaterialCheckBox" => "CheckBox",
+        "AppCompatRadioButton" | "MaterialRadioButton" => "RadioButton",
+        "SwitchCompat" | "SwitchMaterial" | "MaterialSwitch" => "Switch",
+        "AppCompatEditText" | "MaterialEditText" | "TextInputEditText" => "EditText",
+        "AppCompatAutoCompleteTextView" | "MaterialAutoCompleteTextView" | "AutoCompleteTextView" => "EditText",
+        "MaterialCardView" => "CardView",
+        "MaterialToolbar" | "Toolbar" => "Toolbar",
+        "FloatingActionButton" | "ExtendedFloatingActionButton" => "FloatingActionButton",
+        "Chip" => "Chip",
+        "MaterialDivider" => "Divider",
+        "LinearProgressIndicator" => "ProgressBar",
+        "CircularProgressIndicator" => "ProgressBar",
+        "MaterialSeekBar" => "SeekBar",
+        other => other,
+    };
+    kind.to_owned()
+}
+
 /// Builds one element into zero or more nodes (`include` of a `<merge>` can
 /// produce several).
 fn build_element(el: &Element, res: &Resources, depth: usize, stack: &mut Vec<String>) -> Vec<Node> {
@@ -326,7 +358,7 @@ fn apply_include_overrides(el: &Element, node: &mut Node, res: &Resources) {
 }
 
 fn build_view(el: &Element, res: &Resources, depth: usize, stack: &mut Vec<String>) -> Node {
-    let mut node = Node { kind: el.tag_local().to_owned(), ..Default::default() };
+    let mut node = Node { kind: canonical_kind(el.tag_local()), ..Default::default() };
     if let Some(id) = el.attr("android:id") {
         node.id = Some(id_ref(id));
     }
@@ -464,6 +496,7 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, res: &Resources)
         "layout_alignBottom" => s.rel.align_bottom = Some(id_ref(value)),
         "layout_alignStart" | "layout_alignLeft" => s.rel.align_start = Some(id_ref(value)),
         "layout_alignEnd" | "layout_alignRight" => s.rel.align_end = Some(id_ref(value)),
+        "layout_alignBaseline" => s.rel.align_baseline = Some(id_ref(value)),
         "layout_alignParentStart" | "layout_alignParentLeft" => s.rel.parent_start = value == "true",
         "layout_alignParentEnd" | "layout_alignParentRight" => s.rel.parent_end = value == "true",
         "layout_alignParentTop" => s.rel.parent_top = value == "true",
@@ -488,6 +521,8 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, res: &Resources)
         "layout_constraintGuide_begin" => s.con.guide_begin = Some(d(value, res)),
         "layout_constraintGuide_end" => s.con.guide_end = Some(d(value, res)),
         "layout_constraintGuide_percent" => s.con.guide_percent = value.trim().parse().ok(),
+        "layout_editor_absoluteX" => s.con.editor_x = Some(d(value, res)),
+        "layout_editor_absoluteY" => s.con.editor_y = Some(d(value, res)),
         // GridLayout
         "columnCount" => s.grid_cols = value.trim().parse().ok(),
         "rowCount" => {}
@@ -500,6 +535,10 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, res: &Resources)
 }
 
 fn apply_app_attr(node: &mut Node, name: &str, value: &str, res: &Resources) {
+    // ConstraintLayout rules live in the `app:` namespace.
+    if name.starts_with("layout_constraint") || name == "layout_dimensionRatio" || name.starts_with("layout_editor_") {
+        return apply_android_attr(node, name, value, res);
+    }
     let s = &mut node.style;
     match name {
         "cardCornerRadius" => s.radius = Some(d(value, res)),
@@ -616,6 +655,12 @@ fn apply_kind_attrs(el: &Element, node: &mut Node, res: &Resources) {
                 Some(v) => res.boolean(v).unwrap_or(true),
                 None => !explicit_bar,
             };
+            // Material progress indicators say which shape they are.
+            match el.tag_local() {
+                "CircularProgressIndicator" => node.style.spinner = true,
+                "LinearProgressIndicator" => node.style.spinner = false,
+                _ => {}
+            }
         }
         "fragment" => {
             node.kind = "Placeholder".into();
@@ -777,32 +822,114 @@ impl Geom {
 pub fn resolve_positions(node: &mut Node, avail_w: f32, avail_h: f32) {
     // Children are positioned inside this node's inner box.
     let (w, h) = inner_size(node, avail_w, avail_h);
-    match node.kind.as_str() {
-        "RelativeLayout" => solve_relative(node, w, h),
-        "ConstraintLayout" => solve_constraint(node, w, h),
-        _ => {}
+    let solved = match node.kind.as_str() {
+        "RelativeLayout" => {
+            solve_relative(node, w, h);
+            true
+        }
+        "ConstraintLayout" => {
+            solve_constraint(node, w, h);
+            true
+        }
+        _ => false,
+    };
+    // Absolutely positioned children are invisible to CSS measurement, so a
+    // `wrap_content` box would collapse to its padding. Pin the size the solver
+    // (or the child estimates) produced.
+    if uses_absolute_children(&node.kind) {
+        let (sw, sh) = if solved { solved_extent(node, w, h) } else { wrap_extent(node) };
+        if node.style.width == Some(Size::Wrap) {
+            node.style.width = Some(Size::Px(sw.min(avail_w)));
+        }
+        if node.style.height == Some(Size::Wrap) {
+            node.style.height = Some(Size::Px(sh.min(avail_h)));
+        }
     }
     for child in &mut node.children {
         resolve_positions(child, w, h);
     }
 }
 
+/// Whether children of `kind` are absolutely positioned by the renderer.
+fn uses_absolute_children(kind: &str) -> bool {
+    matches!(kind, "FrameLayout" | "Surface" | "CardView" | "RelativeLayout" | "ConstraintLayout")
+}
+
+/// Outer size of a solved absolute container: the farthest child edge plus
+/// the container's padding.
+fn solved_extent(node: &Node, pw: f32, ph: f32) -> (f32, f32) {
+    let mut w: f32 = 0.0;
+    let mut h: f32 = 0.0;
+    for child in &node.children {
+        if child.style.visibility == Visibility::Gone || child.style.guideline.is_some() {
+            continue;
+        }
+        let (cw, ch) = estimate_size(child, pw, ph);
+        let pos = child.style.pos.unwrap_or_default();
+        let right = match (pos.left, pos.right) {
+            (Some(l), Some(r)) => (pw - r).max(l),
+            (Some(l), None) => l + cw,
+            (None, Some(r)) => pw - r,
+            (None, None) => cw,
+        };
+        let bottom = match (pos.top, pos.bottom) {
+            (Some(t), Some(b)) => (ph - b).max(t),
+            (Some(t), None) => t + ch,
+            (None, Some(b)) => ph - b,
+            (None, None) => ch,
+        };
+        w = w.max(right + child.style.margin.end);
+        h = h.max(bottom + child.style.margin.bottom);
+    }
+    let s = &node.style;
+    (w + s.padding.start + s.padding.end, h + s.padding.top + s.padding.bottom)
+}
+
 /// The inner content box of a node given the space available to it.
 fn inner_size(node: &Node, avail_w: f32, avail_h: f32) -> (f32, f32) {
     let s = &node.style;
+    let pad_w = s.padding.start + s.padding.end;
+    let pad_h = s.padding.top + s.padding.bottom;
+    // `wrap_content` boxes are as large as their content, so a centred child
+    // (RelativeLayout `centerVertical`, a ConstraintLayout bias) lands inside
+    // the content, not the whole device.
+    let (wrap_w, wrap_h) = wrap_extent(node);
     let w = match s.width {
-        Some(Size::Px(v)) => (v - s.padding.start - s.padding.end).max(0.0),
-        Some(Size::Percent(p)) => (p / 100.0 * avail_w - s.padding.start - s.padding.end).max(0.0),
-        Some(Size::Match) => (avail_w - s.margin.start - s.margin.end - s.padding.start - s.padding.end).max(0.0),
-        _ => avail_w,
+        Some(Size::Px(v)) => (v - pad_w).max(0.0),
+        Some(Size::Percent(p)) => (p / 100.0 * avail_w - pad_w).max(0.0),
+        Some(Size::Match) => (avail_w - s.margin.start - s.margin.end - pad_w).max(0.0),
+        Some(Size::Wrap) => (wrap_w - pad_w).max(0.0).min(avail_w),
+        None => avail_w,
     };
     let h = match s.height {
-        Some(Size::Px(v)) => (v - s.padding.top - s.padding.bottom).max(0.0),
-        Some(Size::Percent(p)) => (p / 100.0 * avail_h - s.padding.top - s.padding.bottom).max(0.0),
-        Some(Size::Match) => (avail_h - s.margin.top - s.margin.bottom - s.padding.top - s.padding.bottom).max(0.0),
-        _ => avail_h,
+        Some(Size::Px(v)) => (v - pad_h).max(0.0),
+        Some(Size::Percent(p)) => (p / 100.0 * avail_h - pad_h).max(0.0),
+        Some(Size::Match) => (avail_h - s.margin.top - s.margin.bottom - pad_h).max(0.0),
+        Some(Size::Wrap) => (wrap_h - pad_h).max(0.0).min(avail_h),
+        None => avail_h,
     };
     (w, h)
+}
+
+/// Content-driven outer size of a node (padding included). Containers that
+/// stack children on top of each other are as big as their largest child;
+/// flow containers add their children along the main axis.
+fn wrap_extent(node: &Node) -> (f32, f32) {
+    let s = &node.style;
+    if !matches!(node.kind.as_str(), "FrameLayout" | "Surface" | "CardView" | "RelativeLayout" | "ConstraintLayout") {
+        return wrap_estimate(node, 0);
+    }
+    let mut w: f32 = 0.0;
+    let mut h: f32 = 0.0;
+    for child in &node.children {
+        if child.style.visibility == Visibility::Gone || child.style.guideline.is_some() {
+            continue;
+        }
+        let (cw, ch) = wrap_estimate(child, 1);
+        w = w.max(cw + child.style.margin.start + child.style.margin.end);
+        h = h.max(ch + child.style.margin.top + child.style.margin.bottom);
+    }
+    (w + s.padding.start + s.padding.end, h + s.padding.top + s.padding.bottom)
 }
 
 fn id_map(children: &[Node]) -> HashMap<&str, usize> {
@@ -870,6 +997,10 @@ fn solve_relative(node: &mut Node, pw: f32, ph: f32) {
                 top = Some(geom[*o].bottom() + m.top);
             } else if let Some(o) = r.align_top.as_deref().and_then(|id| ids.get(id)) {
                 top = Some(geom[*o].y + m.top);
+            } else if let Some(o) = r.align_baseline.as_deref().and_then(|id| ids.get(id)) {
+                // Text baselines coincide: both sit ~0.8em below their top.
+                let target_font = node.children[*o].style.font_size.unwrap_or(14.0);
+                top = Some(geom[*o].y + 0.8 * (target_font - style.font_size.unwrap_or(14.0)));
             }
             if let Some(o) = r.above.as_deref().and_then(|id| ids.get(id)) {
                 bottom = Some(ph - geom[*o].y + m.bottom);
@@ -1063,7 +1194,10 @@ fn solve_constraint(node: &mut Node, pw: f32, ph: f32) {
                 }
                 (Some(a), None) => (Some(a), None, a),
                 (None, Some(b)) => (None, Some(pw - b), b - ew),
-                (None, None) => (Some(m.start), None, m.start),
+                (None, None) => {
+                    let l = con.editor_x.unwrap_or(m.start);
+                    (Some(l), None, l)
+                }
             };
             geom[i] = Geom { x, y: geom[i].y, w: ew, h: eh };
             pos[i].left = emit_l;
@@ -1103,7 +1237,10 @@ fn solve_constraint(node: &mut Node, pw: f32, ph: f32) {
                 }
                 (Some(a), None) => (Some(a), None, a),
                 (None, Some(b)) => (None, Some(ph - b), b - eh),
-                (None, None) => (Some(m.top), None, m.top),
+                (None, None) => {
+                    let t = con.editor_y.unwrap_or(m.top);
+                    (Some(t), None, t)
+                }
             };
             geom[i] = Geom { x: geom[i].x, y, w: ew, h: eh };
             pos[i].top = emit_t;
