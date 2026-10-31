@@ -126,12 +126,18 @@ fn extract_zip(archive: &Path, dest: &Path, cancel: &CancellationToken) -> IdeRe
             io::Read::read_to_string(&mut file, &mut target)?;
             // Checked everywhere: an escaping link is refused even where links cannot be made.
             validate_link(dest, &rel, Path::new(&target))?;
-            let _ = fs::remove_file(&out);
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(&target, &out)?;
             // Windows can't create symlinks without SeCreateSymbolicLinkPrivilege
             // (os error 1314), so we drop in-archive links there rather than fail
-            // the whole extraction. Validation above still rejects escapes.
+            // the whole extraction — and, unlike upstream's order, we must not
+            // remove an existing file on Windows since nothing replaces it.
+            // Validation above still rejects escapes on every platform.
+            #[cfg(unix)]
+            {
+                let _ = fs::remove_file(&out);
+                std::os::unix::fs::symlink(&target, &out)?;
+            }
+            #[cfg(not(unix))]
+            let _ = target;
             continue;
         }
         let mut w = File::create(&out)?;
@@ -511,6 +517,26 @@ mod tests {
             assert_eq!(fs::read(dest.join("Versions/Current/lib")).unwrap(), b"x");
         }
     }
+    #[cfg(not(unix))]
+    #[test]
+    fn zip_symlink_entry_does_not_delete_existing_file() {
+        // Non-Unix drops in-archive links, so it must not remove an existing
+        // file of the same name first — nothing would replace it.
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("ok.zip");
+        let mut z = zip::ZipWriter::new(File::create(&archive).unwrap());
+        z.start_file("Versions/A/lib", zip::write::SimpleFileOptions::default()).unwrap();
+        io::Write::write_all(&mut z, b"x").unwrap();
+        z.add_symlink("Versions/Current", "A", zip::write::SimpleFileOptions::default()).unwrap();
+        z.finish().unwrap();
+        let dest = tmp.path().join("out");
+        let existing = dest.join("Versions/Current");
+        fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        fs::write(&existing, b"keep me").unwrap();
+        extract(&archive, ArchiveKind::Zip, &dest, "x", &CancellationToken::new()).unwrap();
+        assert_eq!(fs::read(&existing).unwrap(), b"keep me");
+    }
+
 
     #[cfg(unix)]
     #[test]
