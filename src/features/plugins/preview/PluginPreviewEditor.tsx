@@ -9,6 +9,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import clsx from "clsx";
 import { useProject } from "@/platform/project";
 import { tx } from "@/platform/i18n";
+import type { PluginPreviewRendering } from "@/platform/ipc";
 import { IconButton, selectableText } from "@/ui";
 import { pluginsBackend } from "../backend";
 import { errorText, usePlugins } from "../store";
@@ -20,7 +21,7 @@ import styles from "./PluginPreview.module.css";
 /** Debounce before re-rendering: the render call runs a WASM plugin. */
 const RENDER_DELAY = 400;
 /** Last successful render per path, so a remounted pane doesn't flash empty. */
-const renderCache = new Map<string, { html: string; background: string | null }>();
+const renderCache = new Map<string, PluginPreviewRendering>();
 const CACHE_LIMIT = 16;
 /** Monotonic request counter per path; stale responses are dropped. */
 const requestSeq = new Map<string, number>();
@@ -87,7 +88,7 @@ function PluginPreviewPane({ path, refreshSeq }: { path: string; refreshSeq: num
         (r) => {
           if (!live || requestSeq.get(path) !== seq) return;
           if (renderCache.size >= CACHE_LIMIT) renderCache.delete(renderCache.keys().next().value!);
-          renderCache.set(path, { html: r.html, background: r.background });
+          renderCache.set(path, r);
           setResult(r);
           setError(null);
         },
@@ -114,7 +115,10 @@ function PluginPreviewPane({ path, refreshSeq }: { path: string; refreshSeq: num
       ) : result ? (
         <iframe
           className={styles.frame}
-          srcDoc={result.html}
+          // Served over the built-in server the page can run its scripts;
+          // srcDoc (fallback) inherits the app CSP, which blocks them.
+          src={result.url ?? undefined}
+          srcDoc={result.url ? undefined : result.html}
           sandbox="allow-scripts"
           title={label}
           aria-label={label}

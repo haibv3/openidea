@@ -284,6 +284,7 @@ export function createMemoryPluginsBackend(
     renderPreview: async (pluginId) => ({
       pluginId,
       html: '<body style="font-family:sans-serif;padding:16px"><p>(simulated preview)</p></body>',
+      url: null,
       background: null,
     }),
     toolWindowContent: async (pluginId, windowId) => {

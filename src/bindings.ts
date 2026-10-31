@@ -4748,6 +4748,13 @@ export type PluginPreviewDecl = {
 export type PluginPreviewRendering = {
 	pluginId: string,
 	html: string,
+	/**
+	 *  The built-in server's URL for `html`: served over http it has its own
+	 *  CSP, so a plugin's preview scripts run (a `srcDoc` iframe inherits the
+	 *  app's `script-src 'self'`, which blocks them). `None` when the server
+	 *  could not start — the UI falls back to `srcDoc`.
+	 */
+	url: string | null,
 	background: string | null,
 };
 

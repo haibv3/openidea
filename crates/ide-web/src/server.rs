@@ -2,6 +2,8 @@ use ide_core::{IdeError, IdeResult};
 use parking_lot::RwLock;
 use percent_encoding::{AsciiSet, CONTROLS, percent_decode_str, utf8_percent_encode};
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +38,14 @@ struct Shared {
     token: String,
     /// URL key (`/<token>/<key>/…`) → served directory.
     roots: RwLock<HashMap<String, PathBuf>>,
+    /// In-memory pages (`/<token>/page/<key>`) → their HTML; plugin previews.
+    pages: RwLock<HashMap<String, String>>,
+    /// Insertion order of `pages`, for eviction.
+    page_order: RwLock<Vec<String>>,
 }
+
+/// Virtual pages kept at once; plugin previews re-register on each render.
+const PAGE_LIMIT: usize = 128;
 
 /// The built-in web server; started on the first [`WebServer::url_for`].
 pub struct WebServer {
@@ -53,7 +62,12 @@ impl Default for WebServer {
 impl WebServer {
     pub fn new() -> Self {
         Self {
-            shared: Arc::new(Shared { token: uuid::Uuid::new_v4().simple().to_string(), roots: RwLock::default() }),
+            shared: Arc::new(Shared {
+                token: uuid::Uuid::new_v4().simple().to_string(),
+                roots: RwLock::default(),
+                pages: RwLock::default(),
+                page_order: RwLock::default(),
+            }),
             port: tokio::sync::OnceCell::new(),
         }
     }
@@ -96,6 +110,30 @@ impl WebServer {
             .expect("unbounded");
         roots.insert(key.clone(), dir.to_path_buf());
         key
+    }
+
+    /// The URL serving `html` as a `text/html` document (plugin previews).
+    /// The URL changes with the content, so an iframe reloads on each render.
+    pub async fn serve_page(&self, html: &str) -> IdeResult<String> {
+        let key = {
+            let mut h = DefaultHasher::new();
+            html.hash(&mut h);
+            format!("{:x}", h.finish())
+        };
+        {
+            let mut pages = self.shared.pages.write();
+            if !pages.contains_key(&key) {
+                let mut order = self.shared.page_order.write();
+                if order.len() >= PAGE_LIMIT && let Some(old) = order.first().cloned() {
+                    order.remove(0);
+                    pages.remove(&old);
+                }
+                order.push(key.clone());
+            }
+            pages.insert(key.clone(), html.to_owned());
+        }
+        let port = self.port().await?;
+        Ok(format!("http://127.0.0.1:{port}/{}/page/{key}", self.shared.token))
     }
 
     async fn port(&self) -> IdeResult<u16> {
@@ -174,6 +212,8 @@ async fn read_head(sock: &mut TcpStream) -> std::io::Result<Option<Request>> {
 
 enum Response {
     File { path: PathBuf, len: u64 },
+    /// An in-memory `text/html` page registered by [`WebServer::serve_page`].
+    Page(String),
     Redirect(String),
     Error(u16, &'static str),
 }
@@ -195,6 +235,12 @@ async fn serve(mut sock: TcpStream, shared: &Shared, port: u16) -> std::io::Resu
             out.push_str("HTTP/1.1 200 OK\r\n");
             out.push_str(&format!("Content-Type: {}\r\nContent-Length: {len}\r\n", content_type(path)));
         }
+        Response::Page(html) => {
+            out.push_str(&format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n",
+                html.len()
+            ));
+        }
         Response::Redirect(to) => {
             out.push_str(&format!("HTTP/1.1 301 Moved Permanently\r\nLocation: {to}\r\nContent-Length: 0\r\n"));
         }
@@ -213,6 +259,7 @@ async fn serve(mut sock: TcpStream, shared: &Shared, port: u16) -> std::io::Resu
                 let mut file = tokio::fs::File::open(&path).await?;
                 tokio::io::copy(&mut file, &mut sock).await?;
             }
+            Response::Page(html) => sock.write_all(html.as_bytes()).await?,
             Response::Error(_, reason) => sock.write_all(reason.as_bytes()).await?,
             Response::Redirect(_) => {}
         }
@@ -233,17 +280,31 @@ async fn resolve(shared: &Shared, target: &str) -> Response {
         return NOT_FOUND;
     }
     let Some(key) = segments.next().and_then(dec) else { return NOT_FOUND };
-    let Some(mut file) = shared.roots.read().get(&key).cloned() else { return NOT_FOUND };
-    let mut trailing_slash = true;
+    let trailing_slash = path.ends_with('/');
+    let mut rest: Vec<String> = Vec::new();
     for seg in segments {
-        trailing_slash = seg.is_empty();
-        if seg.is_empty() {
+        let Some(s) = dec(seg) else { return NOT_FOUND };
+        if s.is_empty() {
             continue;
         }
-        match dec(seg) {
-            Some(s) if s != "." && s != ".." && !s.contains(['/', '\\', ':', '\0']) => file.push(s),
-            _ => return NOT_FOUND,
+        if s == "." || s == ".." || s.contains(['/', '\\', ':', '\0']) {
+            return NOT_FOUND;
         }
+        rest.push(s);
+    }
+    // In-memory pages (`page/<key>`), e.g. plugin previews.
+    if key == "page" {
+        return if rest.len() == 1
+            && let Some(html) = shared.pages.read().get(&rest[0])
+        {
+            Response::Page(html.clone())
+        } else {
+            NOT_FOUND
+        };
+    }
+    let Some(mut file) = shared.roots.read().get(&key).cloned() else { return NOT_FOUND };
+    for s in rest {
+        file.push(s);
     }
     let Ok(meta) = tokio::fs::metadata(&file).await else { return NOT_FOUND };
     if meta.is_dir() {
@@ -338,6 +399,23 @@ mod tests {
         let other = url.replacen(&server.shared.token, "0123", 1);
         assert!(get(&other, None).await.starts_with("HTTP/1.1 404"));
         assert!(get(&url, Some("evil.example:80")).await.starts_with("HTTP/1.1 403"));
+    }
+
+    #[tokio::test]
+    async fn serves_virtual_pages() {
+        let server = WebServer::new();
+        let url = server.serve_page("<html><body><h1>preview</h1></body></html>").await.unwrap();
+        assert!(url.contains("/page/"), "{url}");
+        let page = get(&url, None).await;
+        assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+        assert!(page.contains("text/html") && page.contains("<h1>preview</h1>"));
+        // Same content → same URL; different content → a different key.
+        assert_eq!(server.serve_page("<html><body><h1>preview</h1></body></html>").await.unwrap(), url);
+        let other = server.serve_page("<html><body>v2</body></html>").await.unwrap();
+        assert_ne!(url, other);
+        // Unknown page keys and extra segments 404.
+        assert!(get(&format!("{url}f"), None).await.starts_with("HTTP/1.1 404"));
+        assert!(get(&format!("{url}/x"), None).await.starts_with("HTTP/1.1 404"));
     }
 
     #[tokio::test]

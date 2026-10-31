@@ -47,6 +47,13 @@ pub enum Image {
 pub const DEVICE_W: f32 = 411.0;
 pub const DEVICE_H: f32 = 891.0;
 
+/// The devices the preview toolbar offers: label, width dp, height dp. The
+/// first entry is the default. Relative/Constraint layouts are re-solved per
+/// size (see `lib.rs::layout_screens`), so these must cover every toolbar
+/// option in the order the toolbar lists them.
+pub const DEVICES: &[(&str, f32, f32)] =
+    &[("Pixel 5 · 411×891", 411.0, 891.0), ("Small · 360×800", 360.0, 800.0), ("Tablet · 800×1280", 800.0, 1280.0)];
+
 /// How a view sizes itself along one axis.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Size {

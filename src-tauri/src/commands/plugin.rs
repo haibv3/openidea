@@ -154,6 +154,11 @@ pub async fn plugin_run_command(
 pub struct PluginPreviewRendering {
     pub plugin_id: String,
     pub html: String,
+    /// The built-in server's URL for `html`: served over http it has its own
+    /// CSP, so a plugin's preview scripts run (a `srcDoc` iframe inherits the
+    /// app's `script-src 'self'`, which blocks them). `None` when the server
+    /// could not start — the UI falls back to `srcDoc`.
+    pub url: Option<String>,
     pub background: Option<String>,
 }
 
@@ -192,13 +197,17 @@ pub async fn plugin_render_preview(
         }),
     };
     let root = project.as_ref().map(|p| p.root.clone());
-    blocking(move || {
+    let (plugin_id, html, background) = blocking(move || {
         let (absolute, relative) = preview_paths(root.as_deref(), &path);
         let request = PreviewRequest { path: absolute, project_path: relative, decl: decl_id, content };
         let PreviewOutput { html, background } = host.render_preview(&plugin_id, request, invocation)?;
-        Ok(PluginPreviewRendering { plugin_id, html, background })
+        Ok((plugin_id, html, background))
     })
-    .await
+    .await?;
+    // Served over http the page carries no CSP of ours, so a plugin's preview
+    // scripts run (a srcDoc iframe inherits `script-src 'self'` and dies).
+    let url = state.web.serve_page(&html).await.ok();
+    Ok(PluginPreviewRendering { plugin_id, html, url, background })
 }
 
 /// The text a plugin's tool window shows: its package `content` file.

@@ -34,7 +34,7 @@ impl Guest for AndroidPreview {
     fn render_preview(request: PreviewRequest) -> Result<PreviewOutput, String> {
         let title = file_name(&request.path);
         let screens = match request.decl.as_str() {
-            "layout-xml" => vec![layout_screen(&request)?],
+            "layout-xml" => layout_screens(&request)?,
             "compose" => compose_screens(&request)?,
             other => return Err(format!("unknown preview kind `{other}`")),
         };
@@ -45,17 +45,33 @@ impl Guest for AndroidPreview {
 
 export!(AndroidPreview);
 
-/// One XML layout file → one screen with the resolved node roots.
-fn layout_screen(request: &PreviewRequest) -> Result<Screen, String> {
+/// One XML layout file → one screen per toolbar device, each with the node
+/// positions re-solved for that viewport: Relative/Constraint rules (and
+/// `match_parent` chains under them) depend on the available size, so simply
+/// resizing the frame would leave children misplaced.
+fn layout_screens(request: &PreviewRequest) -> Result<Vec<Screen>, String> {
     let source = hosts::res_source(&request.project_path, &request.path);
     let res = Resources::new(&*source);
-    let mut roots: Vec<Node> = layout::build(&request.content, &res)?;
-    // Resolve Relative/ConstraintLayout rules into absolute child positions
-    // for the default device viewport (the toolbar resize is approximate).
-    for root in &mut roots {
-        layout::resolve_positions(root, layout::DEVICE_W, layout::DEVICE_H);
-    }
-    Ok(Screen { caption: None, roots, width: None, height: None, bg: None, stretch_roots: true })
+    let roots: Vec<Node> = layout::build(&request.content, &res)?;
+    Ok(layout::DEVICES
+        .iter()
+        .enumerate()
+        .map(|(device, &(_, w, h))| {
+            let mut roots = roots.clone();
+            for root in &mut roots {
+                layout::resolve_positions(root, w, h);
+            }
+            Screen {
+                caption: None,
+                roots,
+                width: Some(w),
+                height: Some(h),
+                bg: None,
+                stretch_roots: true,
+                device: Some(device),
+            }
+        })
+        .collect())
 }
 
 /// Every `@Preview` function in one Kotlin file → one screen per frame.
@@ -73,6 +89,7 @@ fn compose_screens(request: &PreviewRequest) -> Result<Vec<Screen>, String> {
             height: f.height,
             bg: if f.show_background { f.bg_color } else { Some("transparent".to_owned()) },
             stretch_roots: false,
+            device: None,
         })
         .collect())
 }
@@ -109,6 +126,31 @@ mod tests {
         assert!(out.html.contains("flex-direction:column"));
         assert!(out.html.contains("16px 16px 16px 16px")); // padding
         assert!(out.html.contains("ap-device"));
+    }
+
+    #[test]
+    fn layouts_are_resolved_per_device() {
+        // A centred child in a RelativeLayout gets a different absolute
+        // offset per toolbar device: one screen per DEVICES entry.
+        let request = PreviewRequest {
+            path: "app/src/main/res/layout/f.xml".to_owned(),
+            project_path: "/p".to_owned(),
+            decl: "layout-xml".to_owned(),
+            content: r#"
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+    <TextView android:layout_width="100dp" android:layout_height="24dp"
+        android:layout_centerInParent="true" android:text="mid"/>
+</RelativeLayout>
+"#
+            .to_owned(),
+        };
+        let out = AndroidPreview::render_preview(request).unwrap();
+        assert_eq!(out.html.matches("class=\"ap-frame\" data-device").count(), layout::DEVICES.len(), "{}", out.html);
+        // (411−100)/2, (360−100)/2, (800−100)/2: each variant solved its own centre.
+        assert!(out.html.contains("left:155.5px"), "{}", out.html);
+        assert!(out.html.contains("left:130px"), "{}", out.html);
+        assert!(out.html.contains("left:350px"), "{}", out.html);
     }
 
     #[test]

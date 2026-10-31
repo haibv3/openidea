@@ -21,6 +21,9 @@ pub struct Screen {
     /// device); Compose roots size themselves, like a `ComposeView` wrapping
     /// its content at the top start.
     pub stretch_roots: bool,
+    /// Toolbar device this screen belongs to (`DEVICES` index); device
+    /// switching shows/hides these variants instead of resizing them.
+    pub device: Option<usize>,
 }
 
 /// Builds the full standalone HTML document (toolbar + screens).
@@ -30,7 +33,13 @@ pub fn page(title: &str, screens: &[Screen]) -> String {
         let w = s.width.unwrap_or(DEVICE_W);
         let h = s.height.unwrap_or(DEVICE_H);
         let bg = s.bg.as_deref().unwrap_or("var(--ap-window)");
-        body.push_str("<section class=\"ap-frame\">");
+        // Device variants render as one frame each; only the selected device
+        // is visible (they were each laid out for their own viewport).
+        let (variant, hidden) = match s.device {
+            Some(i) => (format!(" data-device=\"{i}\""), if i == 0 { "" } else { " hidden" }),
+            None => (String::new(), ""),
+        };
+        body.push_str(&format!("<section class=\"ap-frame\"{variant}{hidden}>"));
         if let Some(c) = &s.caption {
             // Android Studio shows the explicit frame size in the caption.
             let size = match (s.width, s.height) {
@@ -40,7 +49,8 @@ pub fn page(title: &str, screens: &[Screen]) -> String {
             body.push_str(&format!("<div class=\"ap-caption\">{}{size}</div>", esc(c)));
         }
         // A `@Preview(widthDp/heightDp)` frame keeps that size: the toolbar
-        // only resizes the axes the annotation left free.
+        // only resizes the axes the annotation left free. Device variants are
+        // already the right size, so they are fixed too.
         let fixed = match (s.width.is_some(), s.height.is_some()) {
             (false, false) => "",
             (true, true) => " data-fixed-w data-fixed-h",
@@ -58,17 +68,21 @@ pub fn page(title: &str, screens: &[Screen]) -> String {
         }
         body.push_str("</div></section>");
     }
+    let devices = crate::layout::DEVICES
+        .iter()
+        .enumerate()
+        .map(|(i, (label, w, h))| {
+            let selected = if i == 0 { " selected" } else { "" };
+            format!("<option value=\"{i}\" data-w=\"{}\" data-h=\"{}\"{selected}>{}</option>", fmt(*w), fmt(*h), esc(label))
+        })
+        .collect::<String>();
     format!(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\">\
 <title>{title}</title><style>{CSS}</style></head>\
 <body>\
 <div class=\"ap-bar\" id=\"ap-bar\">\
 <span class=\"ap-title\">{title}</span>\
-<label>Device <select id=\"ap-device\">\
-<option value=\"411x891\" selected>Pixel 5 · 411×891</option>\
-<option value=\"360x800\">Small · 360×800</option>\
-<option value=\"800x1280\">Tablet · 800×1280</option>\
-</select></label>\
+<label>Device <select id=\"ap-device\">{devices}</select></label>\
 <label>Zoom <select id=\"ap-zoom\">\
 <option value=\"0.5\">50%</option><option value=\"0.75\">75%</option>\
 <option value=\"1\" selected>100%</option><option value=\"1.5\">150%</option>\
@@ -79,9 +93,11 @@ pub fn page(title: &str, screens: &[Screen]) -> String {
 <script>{JS}</script>\
 </body></html>",
         title = esc(title),
-        body = body
+        body = body,
+        devices = devices
     )
 }
+
 
 // ---------------------------------------------------------------------------
 // View → HTML
@@ -210,7 +226,12 @@ fn content(n: &Node, inherited: Option<&str>) -> String {
         }
         "Divider" => String::new(),
         "RecyclerView" | "ListView" | "GridView" | "LazyColumn" | "LazyRow" if kids.is_empty() => {
-            format!("<span class=\"ap-empty\">&lt;{}&gt;</span>", esc(&n.kind))
+            // Empty list: Android Studio centres a dashed placeholder in the
+            // whole list area, not a small tag stuck to the top edge.
+            format!(
+                "<span class=\"ap-list-empty\"><span class=\"ap-empty\">&lt;{}&gt;</span></span>",
+                esc(&n.kind)
+            )
         }
         _ => match &n.sub {
             Some(label) if n.kind == "Placeholder" || n.kind == "View" => {
@@ -796,6 +817,7 @@ body { font-family:Roboto,"Segoe UI",sans-serif; background:#B7B4BD; color:#1B1B
   color:var(--ap-fg); cursor:pointer; }
 .ap-stage { display:flex; flex-wrap:wrap; gap:24px; padding:24px; align-items:flex-start; }
 .ap-frame { display:flex; flex-direction:column; gap:6px; }
+.ap-frame[hidden] { display:none; }
 .ap-caption { font-size:12px; color:#33333f; }
 .ap-screen { position:relative; display:flex; flex-direction:column; overflow:hidden;
   box-shadow:0 6px 24px rgba(0,0,0,.3); border-radius:8px; transform-origin:top left;
@@ -847,6 +869,8 @@ body { font-family:Roboto,"Segoe UI",sans-serif; background:#B7B4BD; color:#1B1B
 @keyframes ap-spin { to { transform:rotate(360deg); } }
 .ap-empty { display:inline-block; padding:6px 10px; border:1.5px dashed var(--ap-outline);
   border-radius:6px; color:var(--ap-hint); font-size:11px; }
+.ap-list-empty { display:flex; flex:1 1 auto; align-items:center; justify-content:center;
+  width:100%; min-height:96px; }
 "#;
 
 const JS: &str = r#"
@@ -855,10 +879,16 @@ const JS: &str = r#"
   var zoom = document.getElementById('ap-zoom');
   var dark = document.getElementById('ap-dark');
   function apply() {
-    var parts = device.value.split('x');
-    var w = parseInt(parts[0], 10), h = parseInt(parts[1], 10);
+    var opt = device.options[device.selectedIndex];
+    var w = parseInt(opt.getAttribute('data-w'), 10);
+    var h = parseInt(opt.getAttribute('data-h'), 10);
+    // Device variants were laid out for their own size: show the one the
+    // toolbar selects, hide the rest.
+    document.querySelectorAll('.ap-frame[data-device]').forEach(function (f) {
+      f.hidden = f.getAttribute('data-device') !== device.value;
+    });
+    // Plain screens just resize; data-fixed axes (and variants) keep theirs.
     document.querySelectorAll('.ap-screen').forEach(function (s) {
-      // A frame pinned by @Preview(widthDp/heightDp) keeps that axis.
       if (!s.hasAttribute('data-fixed-w')) s.style.width = w + 'px';
       if (!s.hasAttribute('data-fixed-h')) s.style.height = h + 'px';
       s.style.zoom = zoom.value;

@@ -46,6 +46,9 @@
   display: flex;
   flex-direction: column;
   position: relative;
+  /* Room for the floating mode bar: a plugin's own toolbar (device/zoom)
+     sits at the top of its page and must stay clickable. */
+  padding-top: 36px;
   background: var(--bg-editor, var(--bg-app));
 }
 .frame {
