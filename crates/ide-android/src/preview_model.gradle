@@ -1,0 +1,115 @@
+// Executed as a temporary Gradle init script; does not modify project build files.
+import java.nio.charset.StandardCharsets
+import javax.xml.parsers.DocumentBuilderFactory
+import groovy.json.JsonSlurper
+
+def models = []
+def registerAndroid = { p ->
+    def components = p.extensions.findByName('androidComponents')
+    if (components == null) return
+    components.onVariants(components.selector().all()) { v -> models << [project:p, variant:v] }
+}
+gradle.beforeProject { p ->
+    p.plugins.withId('com.android.application') { registerAndroid(p) }
+    p.plugins.withId('com.android.library') { registerAndroid(p) }
+}
+gradle.rootProject { root ->
+    root.tasks.register('openideaPreviewModel') {
+        doLast {
+            def file = new File(System.getenv('OPENIDEA_PREVIEW_LAYOUT')).canonicalFile
+            def matches = []
+            models.each { item ->
+                def dirs = item.variant.sources.res?.all?.get()?.flatten()?.collect { it.asFile.canonicalFile } ?: []
+                if (dirs.any { file.toPath().startsWith(it.toPath()) }) matches << [item:item, dirs:dirs]
+            }
+            if (matches.empty) {
+                new File(System.getenv('OPENIDEA_PREVIEW_MODEL')).setText('error=' + 'No Android variant contains the requested layout resource'.getBytes(StandardCharsets.UTF_8).encodeHex() + '\n', 'UTF-8')
+                return
+            }
+            def modules = matches.collect { it.item.project.path }.unique()
+            if (modules.size() != 1) {
+                new File(System.getenv('OPENIDEA_PREVIEW_MODEL')).setText('error=' + 'Layout belongs to multiple Android modules'.getBytes(StandardCharsets.UTF_8).encodeHex() + '\n', 'UTF-8')
+                return
+            }
+            matches.sort { a, b ->
+                def ad = a.item.variant.buildType == 'debug' ? 0 : 1
+                def bd = b.item.variant.buildType == 'debug' ? 0 : 1
+                ad <=> bd ?: a.item.variant.name <=> b.item.variant.name
+            }
+            def selected = matches[0]
+            def p = selected.item.project
+            def v = selected.item.variant
+            def android = p.extensions.getByName('android')
+            def loader = v.class.classLoader
+            def artifact = { name ->
+                def c = loader.loadClass('com.android.build.api.artifact.SingleArtifact$' + name)
+                v.artifacts.get(c.getField('INSTANCE').get(null)).get().asFile
+            }
+            def lines = []
+            def add = { key, value ->
+                if (value != null) lines << key + '=' + value.toString().getBytes(StandardCharsets.UTF_8).encodeHex().toString()
+            }
+            add('module', p.path); add('variant', v.name); add('namespace', v.namespace.get())
+            add('compileSdk', android.compileSdkVersion)
+            p.extensions.getByName('androidComponents').sdkComponents.bootClasspath.get().each { add('boot', it.asFile.absolutePath) }
+            selected.dirs.each { add('res', it.absolutePath) }
+            def manifest = artifact('MERGED_MANIFEST')
+            add('manifest', manifest.absolutePath)
+            add('symbols', artifact('RUNTIME_SYMBOL_LIST').absolutePath)
+            def parseXml = { f ->
+                def factory = DocumentBuilderFactory.newInstance()
+                factory.setNamespaceAware(true)
+                factory.setFeature('http://apache.org/xml/features/disallow-doctype-decl', true)
+                factory.newDocumentBuilder().parse(f)
+            }
+            if (manifest.isFile()) {
+                def layoutRoot = parseXml(new File(System.getenv('OPENIDEA_PREVIEW_BUFFER'))).documentElement
+                def theme = layoutRoot.getAttributeNS('http://schemas.android.com/tools', 'theme')
+                if (!theme) theme = layoutRoot.getAttributeNS('http://schemas.android.com/apk/res/android', 'theme')
+                if (!theme) {
+                    def apps = parseXml(manifest).getElementsByTagName('application')
+                    if (apps.length > 0) theme = apps.item(0).getAttributeNS('http://schemas.android.com/apk/res/android', 'theme')
+                }
+                add('theme', theme)
+            }
+            if (p.plugins.hasPlugin('com.android.application')) {
+                def apkDir = artifact('APK')
+                add('apkdir', apkDir.absolutePath)
+                def metadata = new File(apkDir, 'output-metadata.json')
+                if (metadata.isFile()) {
+                    def output = new JsonSlurper().parse(metadata)
+                    if (output.variantName != v.name) throw new GradleException('APK metadata variant does not match selected variant')
+                    def apks = output.elements.findAll { it.type == 'SINGLE' && !it.filters }
+                    if (apks.size() == 1) add('apk', new File(apkDir, apks[0].outputFile).absolutePath)
+                }
+            }
+            def merged = p.layout.buildDirectory.dir("intermediates/incremental/${v.name}/merge${v.name.capitalize()}Resources/merged.dir").get().asFile
+            if (merged.isDirectory()) add('merged', merged.absolutePath)
+            def conf = p.configurations.getByName(v.name + 'RuntimeClasspath')
+            def view = conf.incoming.artifactView { attributes.attribute(org.gradle.api.attributes.Attribute.of('artifactType', String), 'android-classes-jar') }
+            view.files.files.each { add('classpath', it.absolutePath) }
+            def resView = conf.incoming.artifactView {
+                lenient true
+                attributes.attribute(org.gradle.api.attributes.Attribute.of('artifactType', String), 'android-res')
+            }
+            resView.files.files.findAll { it.isDirectory() }.each { add('dependencyResources', it.absolutePath) }
+            def resourceJar = p.layout.buildDirectory.file("intermediates/compile_and_runtime_r_class_jar/${v.name}/process${v.name.capitalize()}Resources/R.jar").get().asFile
+            if (resourceJar.isFile()) add('resourceClasses', resourceJar.absolutePath)
+            else add('missingClasses', "process${v.name.capitalize()}Resources")
+            def cap = v.name.substring(0, 1).toUpperCase(Locale.ROOT) + v.name.substring(1)
+            ["compile${cap}JavaWithJavac", "compile${cap}Kotlin"].each { n ->
+                def t = p.tasks.findByName(n)
+                if (t != null && t.hasProperty('destinationDirectory')) {
+                    def dest = t.destinationDirectory.get().asFile
+                    if (dest.isDirectory()) add('projectClasses', dest.absolutePath)
+                    else {
+                        def kotlin = n.endsWith('Kotlin')
+                        def sourceFiles = kotlin ? t.sources.asFileTree.files : t.source.files
+                        if (sourceFiles.any { it.isFile() && (!kotlin || it.name.endsWith('.kt') || it.name.endsWith('.kts')) }) add('missingClasses', n)
+                    }
+                }
+            }
+            new File(System.getenv('OPENIDEA_PREVIEW_MODEL')).setText(lines.join('\n') + '\n', 'UTF-8')
+        }
+    }
+ }

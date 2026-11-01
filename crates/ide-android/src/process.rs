@@ -1,4 +1,4 @@
-//! Child processes of adb: bounded runs and cancellable line streams.
+//! Bounded runs and cancellable line streams for Android tool processes.
 
 use ide_core::{CancellationToken, IdeError, IdeResult};
 use std::io::Read;
@@ -23,7 +23,7 @@ fn prepare(cmd: &mut Command) {
 }
 
 fn spawn(cmd: &mut Command) -> IdeResult<Child> {
-    cmd.spawn().map_err(|e| IdeError::unavailable(format!("could not run adb: {e}")))
+    cmd.spawn().map_err(|e| IdeError::unavailable(format!("could not start process: {e}")))
 }
 
 /// Kills the child and, on Unix, its whole process group.
@@ -70,7 +70,7 @@ pub(crate) fn run(mut cmd: Command, timeout: Duration, cancel: Option<&Cancellat
         }
         if Instant::now() >= deadline {
             kill(&mut child);
-            return Err(IdeError::unavailable("adb did not respond in time"));
+            return Err(IdeError::unavailable("process did not respond in time"));
         }
         std::thread::sleep(Duration::from_millis(10));
     };

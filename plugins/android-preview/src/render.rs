@@ -125,15 +125,7 @@ fn content(n: &Node, inherited: Option<&str>) -> String {
     match n.kind.as_str() {
         "TextView" | "Button" | "OutlinedButton" | "TextButton" | "ElevatedButton" | "FilledTonalButton"
         | "IconButton" | "Chip" => {
-            let icon = match &n.style.icon {
-                Some(crate::layout::Image::Svg(svg)) => {
-                    format!("<span class=\"ap-btn-icon\">{svg}</span>")
-                }
-                Some(crate::layout::Image::Uri(uri)) => {
-                    format!("<span class=\"ap-btn-icon\" style=\"background-image:url('{uri}')\"></span>")
-                }
-                None => String::new(),
-            };
+            let icon = icon_html(n.style.icon.as_ref(), "ap-btn-icon");
             let label = n.text.clone().or_else(|| n.sub.clone());
             let text = match label {
                 Some(text) => {
@@ -152,7 +144,10 @@ fn content(n: &Node, inherited: Option<&str>) -> String {
                 ),
                 None => String::new(),
             };
-            format!("{icon}{text}{kids}")
+            // Compound drawables flank the text, as `android:drawableStart` does.
+            let start = icon_html(n.style.drawable_start.as_ref(), "ap-btn-icon");
+            let end = icon_html(n.style.drawable_end.as_ref(), "ap-btn-icon");
+            format!("{start}{icon}{text}{end}{kids}")
         }
         "EditText" => {
             let shown = n.text.clone().or_else(|| n.hint.clone()).unwrap_or_else(|| "…".to_owned());
@@ -188,10 +183,17 @@ fn content(n: &Node, inherited: Option<&str>) -> String {
         }
         "CheckBox" | "RadioButton" => {
             let checked = n.style.checked.unwrap_or(false);
-            let mut box_class = if n.kind == "RadioButton" { "ap-box ap-radio" } else { "ap-box" };
+            let radio = n.kind == "RadioButton";
+            let mut box_class = if radio { "ap-box ap-radio" } else { "ap-box" };
             if checked {
-                box_class = if n.kind == "RadioButton" { "ap-box ap-radio ap-on" } else { "ap-box ap-on" };
+                box_class = if radio { "ap-box ap-radio ap-on" } else { "ap-box ap-on" };
             }
+            // `android:buttonTint` recolours the box itself.
+            let tint = match &n.style.tint {
+                Some(c) if checked => format!(" style=\"background:{c};border-color:{c}\"", c = esc(c)),
+                Some(c) => format!(" style=\"border-color:{}\"", esc(c)),
+                None => String::new(),
+            };
             let label = n.text.clone().unwrap_or_default();
             let label = if label.is_empty() {
                 String::new()
@@ -202,29 +204,148 @@ fn content(n: &Node, inherited: Option<&str>) -> String {
                     esc(&label)
                 )
             };
-            format!("<span class=\"ap-check\"><span class=\"{box_class}\"></span>{label}</span>{kids}")
+            format!("<span class=\"ap-check\"><span class=\"{box_class}\"{tint}></span>{label}</span>{kids}")
         }
         "Switch" => {
             let on = n.style.checked.unwrap_or(false);
+            let track = match &n.style.track_tint {
+                Some(c) => format!("background:{};", esc(c)),
+                None => String::new(),
+            };
+            let thumb = match &n.style.thumb_tint {
+                Some(c) => format!("background:{};", esc(c)),
+                None => String::new(),
+            };
             format!(
-                "<span class=\"ap-switch{}\"><span class=\"ap-knob\"></span></span>{kids}",
+                "<span class=\"ap-switch{}\" style=\"{track}\"><span class=\"ap-knob\" style=\"{thumb}\"></span></span>{kids}",
                 if on { " ap-on" } else { "" }
             )
         }
         "SeekBar" => {
             let (v, max) = n.style.progress.unwrap_or((0.0, 100.0));
             let pct = if max > 0.0 { (v / max * 100.0).clamp(0.0, 100.0) } else { 0.0 };
-            format!("<span class=\"ap-seek\"><span class=\"ap-seek-fill\" style=\"width:{pct}%\"></span></span>{kids}")
+            let fill = tint_style(n.style.progress_tint.as_deref());
+            let track = tint_style(n.style.track_tint.as_deref());
+            format!(
+                "<span class=\"ap-seek\" style=\"{track}\"><span class=\"ap-seek-fill\" style=\"width:{pct}%;{fill}\"></span>\
+<span class=\"ap-thumb\" style=\"left:{pct}%;{fill}\"></span></span>{kids}"
+            )
         }
-        "ProgressBar" if n.style.spinner => format!("<span class=\"ap-spinner\"></span>{kids}"),
+        "ProgressBar" if n.style.spinner => {
+            let fill = tint_style(n.style.progress_tint.as_deref());
+            format!("<span class=\"ap-spinner\" style=\"{fill}\"></span>{kids}")
+        }
         "ProgressBar" => {
             let (v, max) = n.style.progress.unwrap_or((0.0, 100.0));
             let pct = if max > 0.0 { (v / max * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+            let fill = tint_style(n.style.progress_tint.as_deref());
+            let track = tint_style(n.style.track_tint.as_deref());
             format!(
-                "<span class=\"ap-bar-track\"><span class=\"ap-bar-fill\" style=\"width:{pct}%\"></span></span>{kids}"
+                "<span class=\"ap-bar-track\" style=\"{track}\"><span class=\"ap-bar-fill\" style=\"width:{pct}%;{fill}\"></span></span>{kids}"
+            )
+        }
+        "RatingBar" => {
+            let (value, max) = n.style.rating.unwrap_or((0.0, 5.0));
+            let stars = (0..max.round().clamp(0.0, 12.0) as u32)
+                .map(|i| {
+                    let on = (i as f32) < value.round() || (value - i as f32) > 0.25;
+                    format!("<span class=\"ap-star{}\">★</span>", if on { " ap-star-on" } else { "" })
+                })
+                .collect::<String>();
+            format!("<span class=\"ap-stars\">{stars}</span>{kids}")
+        }
+        "Spinner" => {
+            let label = n.text.clone().or_else(|| n.hint.clone()).unwrap_or_default();
+            format!(
+                "<span class=\"ap-text\" style=\"{}\">{}</span><span class=\"ap-caret\">▾</span>{kids}",
+                text_style(&n.style, &n.kind, inherited),
+                esc(&label)
             )
         }
         "Divider" => String::new(),
+        "Toolbar" | "BottomAppBar" => {
+            let nav = icon_html(n.style.drawable_start.as_ref(), "ap-toolbar-nav");
+            let title = match &n.text {
+                Some(t) if !t.is_empty() => {
+                    format!("<span class=\"ap-toolbar-title\" style=\"{}\">{}</span>", text_style(&n.style, "TextView", inherited), esc(t))
+                }
+                _ => String::new(),
+            };
+            let subtitle = match &n.hint {
+                Some(t) if !t.is_empty() => format!("<span class=\"ap-toolbar-sub\">{}</span>", esc(t)),
+                _ => String::new(),
+            };
+            let actions: String = n
+                .items
+                .iter()
+                .map(|it| format!("<span class=\"ap-action\">{}<span>{}</span></span>", icon_html(it.icon.as_ref(), "ap-action-icon"), esc(&it.label)))
+                .collect();
+            format!("{nav}<span class=\"ap-toolbar-text\">{title}{subtitle}</span>{kids}<span class=\"ap-actions\">{actions}</span>")
+        }
+        "TextInputLayout" => {
+            let label = n.hint.clone().or_else(|| n.text.clone()).unwrap_or_default();
+            let label = if label.is_empty() {
+                String::new()
+            } else {
+                format!("<span class=\"ap-til-label\">{}</span>", esc(&label))
+            };
+            let start = icon_html(n.style.drawable_start.as_ref(), "ap-til-icon");
+            let end = icon_html(n.style.drawable_end.as_ref(), "ap-til-icon");
+            format!("{label}<span class=\"ap-til-field\">{start}{kids}{end}</span>")
+        }
+        "SearchView" => {
+            let hint = n.hint.clone().or_else(|| n.text.clone()).unwrap_or_else(|| "Search".to_owned());
+            format!("<span class=\"ap-search-icon\">⌕</span><span class=\"ap-search-hint\">{}</span>{kids}", esc(&hint))
+        }
+        "TabLayout" => {
+            let tabs = if n.children.is_empty() {
+                n.items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, it)| {
+                        format!(
+                            "<span class=\"ap-tab{}\">{}</span>",
+                            if i == 0 { " ap-tab-on" } else { "" },
+                            esc(&it.label)
+                        )
+                    })
+                    .collect()
+            } else {
+                kids
+            };
+            format!("<span class=\"ap-tabs\">{tabs}</span>")
+        }
+        "TabItem" => {
+            let label = n.text.clone().unwrap_or_default();
+            let on = n.style.checked.unwrap_or(false);
+            format!("<span class=\"ap-tab{}\">{}</span>", if on { " ap-tab-on" } else { "" }, esc(&label))
+        }
+        "BottomNavigationView" | "NavigationRailView" | "NavigationView" => {
+            let rail = n.kind == "NavigationRailView";
+            let items: String = n
+                .items
+                .iter()
+                .map(|it| {
+                    format!(
+                        "<span class=\"ap-nav-item{}\">{}<span class=\"ap-nav-label\">{}</span></span>",
+                        if rail { " ap-nav-rail" } else { "" },
+                        icon_html(it.icon.as_ref(), "ap-nav-icon"),
+                        esc(&it.label)
+                    )
+                })
+                .collect();
+            format!("{items}{kids}")
+        }
+        "FloatingActionButton" => {
+            let icon = icon_html(n.style.icon.as_ref().or(n.style.src_image.as_ref()), "ap-fab-icon");
+            let label = match (&n.text, &n.sub) {
+                (Some(t), _) if !t.is_empty() => format!("<span class=\"ap-fab-label\">{}</span>", esc(t)),
+                (_, Some(t)) if !t.is_empty() => format!("<span class=\"ap-fab-label\">{}</span>", esc(t)),
+                _ if icon.is_empty() && kids.is_empty() => "<span class=\"ap-fab-label\">+</span>".to_owned(),
+                _ => String::new(),
+            };
+            format!("{icon}{label}{kids}")
+        }
         "RecyclerView" | "ListView" | "GridView" | "LazyColumn" | "LazyRow" if kids.is_empty() => {
             // Empty list: Android Studio centres a dashed placeholder in the
             // whole list area, not a small tag stuck to the top edge.
@@ -233,12 +354,75 @@ fn content(n: &Node, inherited: Option<&str>) -> String {
                 esc(&n.kind)
             )
         }
+        // Boxes the preview cannot draw but Android Studio still outlines.
+        "SurfaceView" | "WebView" | "CalendarView" | "DatePicker" | "TimePicker" | "NumberPicker" | "ViewPager"
+            if kids.is_empty() =>
+        {
+            format!("<span class=\"ap-empty\">&lt;{}&gt;</span>", esc(&n.kind))
+        }
         _ => match &n.sub {
             Some(label) if n.kind == "Placeholder" || n.kind == "View" => {
                 format!("<span class=\"ap-empty\">&lt;{}&gt;</span>", esc(label))
             }
+            // An unmapped widget shows its kind rather than an empty box.
+            None if kids.is_empty() && !LABELLESS.contains(&n.kind.as_str()) => {
+                format!("<span class=\"ap-empty\">&lt;{}&gt;</span>", esc(&n.kind))
+            }
             _ => kids,
         },
+    }
+}
+
+/// Kinds whose empty state is intentional (containers, spacers, helpers).
+const LABELLESS: &[&str] = &[
+    "LinearLayout",
+    "FrameLayout",
+    "RelativeLayout",
+    "ConstraintLayout",
+    "GridLayout",
+    "ScrollView",
+    "NestedScrollView",
+    "HorizontalScrollView",
+    "CardView",
+    "Surface",
+    "Box",
+    "Column",
+    "Row",
+    "Space",
+    "Guideline",
+    "Barrier",
+    "Group",
+    "Flow",
+    "ChipGroup",
+    "Divider",
+    "Frame",
+    "View",
+    "IconButton",
+    "Toolbar",
+    "BottomAppBar",
+    "TabLayout",
+    "BottomNavigationView",
+    "NavigationRailView",
+    "NavigationView",
+    "TextInputLayout",
+];
+
+/// Inline SVG / `data:` URI icon markup, or nothing.
+fn icon_html(icon: Option<&crate::layout::Image>, class: &str) -> String {
+    match icon {
+        Some(crate::layout::Image::Svg(svg)) => format!("<span class=\"{class}\">{svg}</span>"),
+        Some(crate::layout::Image::Uri(uri)) => {
+            format!("<span class=\"{class}\" style=\"background-image:url('{uri}')\"></span>")
+        }
+        None => String::new(),
+    }
+}
+
+/// `background:<colour>;` for a tint, empty when there is none.
+fn tint_style(color: Option<&str>) -> String {
+    match color {
+        Some(c) => format!("background:{};", esc(c)),
+        None => String::new(),
     }
 }
 
@@ -253,7 +437,8 @@ fn uses_absolute_children(kind: &str) -> bool {
 
 use crate::layout::Edges;
 use crate::resources::{
-    M3_ON_PRIMARY, M3_ON_SURFACE, M3_OUTLINE, M3_PRIMARY, M3_PRIMARY_CONTAINER, M3_SURFACE, M3_SURFACE_VARIANT,
+    M3_ON_PRIMARY, M3_ON_SURFACE, M3_ON_SURFACE_VARIANT, M3_OUTLINE, M3_OUTLINE_VARIANT, M3_PRIMARY,
+    M3_PRIMARY_CONTAINER, M3_SURFACE, M3_SURFACE_VARIANT,
 };
 
 /// Default appearance a view kind gets from the app theme. Merged *below*
@@ -336,10 +521,69 @@ fn widget_defaults(kind: &str) -> Defaults {
             font_size: Some(16.0),
             ..NO_DEFAULTS
         },
+        // Material 3 filled text field: the container paints the box, the inner
+        // EditText is chrome-less.
+        "TextInputLayout" => Defaults {
+            bg: Some("#E6E0E9"),
+            fg: Some(M3_ON_SURFACE),
+            radius: Some(4.0),
+            padding: Edges { start: 16.0, end: 16.0, top: 8.0, bottom: 8.0 },
+            min_h: Some(56.0),
+            font_size: Some(16.0),
+            ..NO_DEFAULTS
+        },
+        "SearchView" => Defaults {
+            bg: Some(M3_SURFACE_VARIANT),
+            fg: Some(M3_ON_SURFACE),
+            radius: Some(28.0),
+            padding: Edges { start: 16.0, end: 16.0, top: 0.0, bottom: 0.0 },
+            min_h: Some(56.0),
+            font_size: Some(16.0),
+            ..NO_DEFAULTS
+        },
         "SeekBar" => Defaults { min_h: Some(48.0), ..NO_DEFAULTS },
+        "RatingBar" => Defaults { min_h: Some(32.0), ..NO_DEFAULTS },
         "ProgressBar" => Defaults { ..NO_DEFAULTS },
+        "Spinner" => Defaults {
+            min_h: Some(48.0),
+            padding: Edges { start: 16.0, end: 8.0, top: 0.0, bottom: 0.0 },
+            font_size: Some(16.0),
+            fg: Some(M3_ON_SURFACE),
+            ..NO_DEFAULTS
+        },
         "CardView" => Defaults { bg: Some(M3_SURFACE), radius: Some(12.0), elevation: Some(1.0), ..NO_DEFAULTS },
-        "Toolbar" => Defaults { bg: Some(M3_SURFACE), min_h: Some(56.0), ..NO_DEFAULTS },
+        "Toolbar" => Defaults {
+            bg: Some(M3_SURFACE),
+            fg: Some(M3_ON_SURFACE),
+            min_h: Some(56.0),
+            padding: Edges { start: 16.0, end: 16.0, top: 0.0, bottom: 0.0 },
+            font_size: Some(20.0),
+            ..NO_DEFAULTS
+        },
+        "BottomAppBar" => Defaults { bg: Some(M3_SURFACE), min_h: Some(80.0), elevation: Some(3.0), ..NO_DEFAULTS },
+        "TabLayout" => Defaults { bg: Some(M3_SURFACE), min_h: Some(48.0), ..NO_DEFAULTS },
+        "TabItem" => Defaults {
+            min_h: Some(48.0),
+            center: true,
+            padding: Edges { start: 16.0, end: 16.0, top: 0.0, bottom: 0.0 },
+            font_size: Some(14.0),
+            font_weight: Some("500"),
+            fg: Some(M3_ON_SURFACE_VARIANT),
+            ..NO_DEFAULTS
+        },
+        "BottomNavigationView" => Defaults {
+            bg: Some(M3_SURFACE),
+            fg: Some(M3_ON_SURFACE_VARIANT),
+            min_h: Some(80.0),
+            font_size: Some(12.0),
+            ..NO_DEFAULTS
+        },
+        "NavigationView" | "NavigationRailView" => Defaults {
+            bg: Some(M3_SURFACE),
+            fg: Some(M3_ON_SURFACE_VARIANT),
+            font_size: Some(14.0),
+            ..NO_DEFAULTS
+        },
         "Chip" => Defaults {
             bg: Some(M3_SURFACE_VARIANT),
             fg: Some(M3_ON_SURFACE),
@@ -350,6 +594,13 @@ fn widget_defaults(kind: &str) -> Defaults {
             font_size: Some(14.0),
             ..NO_DEFAULTS
         },
+        "ChipGroup" => Defaults { ..NO_DEFAULTS },
+        "SurfaceView" => Defaults { bg: Some("#000000"), min_h: Some(120.0), ..NO_DEFAULTS },
+        "WebView" => Defaults { bg: Some("#FFFFFF"), min_h: Some(120.0), ..NO_DEFAULTS },
+        "CalendarView" | "DatePicker" | "TimePicker" | "NumberPicker" => {
+            Defaults { bg: Some(M3_SURFACE), min_h: Some(160.0), ..NO_DEFAULTS }
+        }
+        "ViewPager" => Defaults { ..NO_DEFAULTS },
         _ => NO_DEFAULTS,
     }
 }
@@ -365,18 +616,50 @@ fn effective_fg(n: &Node) -> Option<String> {
 /// text style. Emitted on the box so content that has no style of its own
 /// inherits it (a Compose `Button { Text(…) }` label is `labelLarge`).
 fn font_props(s: &Style, d: &Defaults) -> (Option<f32>, Option<&'static str>) {
-    let weight = match s.bold {
-        Some(true) => Some("600"),
-        Some(false) => None,
-        None => d.font_weight,
+    let weight = match s.font_weight {
+        Some(w) => Some(weight_css(w)),
+        None => match s.bold {
+            Some(true) => Some("600"),
+            Some(false) => None,
+            None => d.font_weight,
+        },
     };
     (s.font_size.or(d.font_size), weight)
 }
 
-/// The effective box padding: an explicit `padding`/`contentPadding` wins, an
-/// untouched box takes the kind's default.
+/// `android:textFontWeight="500"` → a CSS font-weight keyword.
+fn weight_css(w: u32) -> &'static str {
+    match w {
+        100..=150 => "100",
+        151..=250 => "200",
+        251..=350 => "300",
+        351..=450 => "400",
+        451..=550 => "500",
+        551..=650 => "600",
+        651..=750 => "700",
+        751..=850 => "800",
+        _ => "900",
+    }
+}
+
+/// The effective box padding: a `<shape>` `<padding>` applies when the view set
+/// none, an explicit `padding`/`contentPadding` wins, an untouched box takes
+/// the kind's default.
 fn effective_padding(s: &Style, d: &Defaults) -> Edges {
-    if s.padding == Edges::default() { d.padding } else { s.padding }
+    if s.padding != Edges::default() {
+        return s.padding;
+    }
+    if let Some(shape) = &s.shape
+        && shape.padding != [0.0; 4]
+    {
+        return Edges {
+            start: shape.padding[0],
+            top: shape.padding[1],
+            end: shape.padding[2],
+            bottom: shape.padding[3],
+        };
+    }
+    d.padding
 }
 
 /// Shared box styles for every view (positioning, size, spacing, paint).
@@ -384,6 +667,9 @@ fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> Str
     let abs_child = parent.map(|p| uses_absolute_children(p.kind.as_str())).unwrap_or(false);
     let s = &n.style;
     let mut out = String::new();
+    let mut tf: Vec<String> = Vec::new();
+    // A Material text field paints the box; its inner EditText is chrome-less.
+    let in_text_field = n.kind == "EditText" && parent.is_some_and(|p| p.kind == "TextInputLayout");
 
     // Display / positioning model per container kind.
     match n.kind.as_str() {
@@ -402,6 +688,15 @@ fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> Str
                 out.push_str(&format!("gap:{}px;", fmt(gap)));
             }
         }
+        "ChipGroup" => out.push_str("display:flex;flex-wrap:wrap;align-items:center;gap:8px;"),
+        "TabLayout" | "BottomNavigationView" | "BottomAppBar" | "Toolbar" => {
+            out.push_str("display:flex;flex-direction:row;align-items:center;")
+        }
+        "NavigationView" | "NavigationRailView" => out.push_str("display:flex;flex-direction:column;"),
+        "TextInputLayout" => out.push_str("display:flex;flex-direction:column;justify-content:center;"),
+        "SearchView" | "RatingBar" => out.push_str("display:flex;flex-direction:row;align-items:center;"),
+        "Spinner" => out.push_str("display:flex;flex-direction:row;align-items:center;justify-content:space-between;"),
+        "ViewPager" => out.push_str("display:flex;flex-direction:column;overflow:hidden;"),
         "ScrollView" | "NestedScrollView" | "LazyColumn" | "RecyclerView" | "ListView" => {
             out.push_str("display:flex;flex-direction:column;overflow-y:auto;");
             if let Some(g) = s.gravity {
@@ -429,7 +724,7 @@ fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> Str
     }
 
     // Size + positioning.
-    let d = widget_defaults(&n.kind);
+    let d = if in_text_field { NO_DEFAULTS } else { widget_defaults(&n.kind) };
     if root {
         out.push_str("overflow:hidden;");
         if stretch {
@@ -465,7 +760,11 @@ fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> Str
                 }
                 None => out.push_str(&format!("left:{}px;top:{}px;", fmt(pad.start), fmt(pad.top))),
             },
-            _ => push_frame_anchor(&mut out, s.layout_gravity.unwrap_or_default(), s, &pad),
+            _ => {
+                if let Some(t) = push_frame_anchor(&mut out, s.layout_gravity.unwrap_or_default(), s, &pad) {
+                    tf.push(t.to_owned());
+                }
+            }
         }
         push_abs_size(&mut out, s);
     } else {
@@ -484,22 +783,34 @@ fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> Str
         out.push_str("overflow:hidden;");
     }
 
-    // Theme minimums and content centring.
+    if in_text_field {
+        out.push_str("background:transparent;");
+    }
+
+    // Theme minimums (`android:minWidth` wins over the widget default).
     if s.weight.is_none() {
-        if let Some(w) = d.min_w {
+        if let Some(w) = s.min_width.or(d.min_w) {
             out.push_str(&format!("min-width:{}px;", fmt(w)));
         }
     }
-    if let Some(h) = d.min_h {
+    if let Some(h) = s.min_height.or(d.min_h) {
         out.push_str(&format!("min-height:{}px;", fmt(h)));
+    }
+    if let Some(w) = s.max_width {
+        out.push_str(&format!("max-width:{}px;", fmt(w)));
+    }
+    if let Some(h) = s.max_height {
+        out.push_str(&format!("max-height:{}px;", fmt(h)));
     }
     if d.center {
         out.push_str("display:flex;align-items:center;justify-content:center;");
     }
 
-    // Box paint: explicit attribute → style/shape → theme default.
+    // Box paint: explicit attribute → shape/gradient → theme default.
     if let Some(bg) = &s.bg_color {
         out.push_str(&format!("background:{};", esc(bg)));
+    } else if let Some(g) = s.shape.as_ref().and_then(|sh| sh.gradient.as_ref()) {
+        out.push_str(&format!("background:{};", gradient_css(g)));
     } else if let Some(fill) = s.shape.as_ref().and_then(|sh| sh.fill.as_ref()) {
         out.push_str(&format!("background:{};", esc(fill)));
     } else if let Some(bg) = d.bg {
@@ -535,22 +846,49 @@ fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> Str
         out.push_str(&format!("border:{}px solid {};", fmt(*w), esc(color)));
     } else if let Some((w, color)) = d.border {
         out.push_str(&format!("border:{}px solid {};", fmt(w), esc(color)));
+    } else if s.outlined {
+        // `Widget.Material3.CardView.Outlined`, outlined text fields.
+        out.push_str(&format!("border:1px solid {M3_OUTLINE_VARIANT};"));
     }
     if let Some(a) = s.alpha {
         out.push_str(&format!("opacity:{};", fmt(a)));
     }
-    if let Some(e) = s.elevation.or(d.elevation) {
-        if e > 0.0 {
-            out.push_str(&format!("box-shadow:0 {}px {}px rgba(0,0,0,0.26);", fmt(e * 0.5), fmt(e)));
-        }
+    // Elevation is an outer shadow; `android:foreground` paints an inset layer
+    // above the background, the way FrameLayout/Card foregrounds do.
+    let mut shadows: Vec<String> = Vec::new();
+    if let Some(e) = s.elevation.or(d.elevation)
+        && e > 0.0
+    {
+        shadows.push(format!("0 {}px {}px rgba(0,0,0,0.26)", fmt(e * 0.5), fmt(e)));
     }
-    if let Some(rot) = s.rotation {
-        if rot != 0.0 {
-            out.push_str(&format!("transform:rotate({}deg);", fmt(rot)));
-        }
+    if let Some(fg) = &s.foreground {
+        shadows.push(format!("inset 0 0 0 100vmax {}", esc(fg)));
     }
-    if let Some((dx, dy)) = s.offset {
-        out.push_str(&format!("left:{}px;top:{}px;", fmt(dx), fmt(dy)));
+    if !shadows.is_empty() {
+        out.push_str(&format!("box-shadow:{};", shadows.join(",")));
+    }
+    if let Some(rot) = s.rotation
+        && rot != 0.0
+    {
+        tf.push(format!("rotate({}deg)", fmt(rot)));
+    }
+    if let Some((dx, dy)) = s.offset
+        && (dx != 0.0 || dy != 0.0)
+    {
+        tf.push(format!("translate({}px,{}px)", fmt(dx), fmt(dy)));
+    }
+    if let Some((tx, ty)) = s.translation
+        && (tx != 0.0 || ty != 0.0)
+    {
+        tf.push(format!("translate({}px,{}px)", fmt(tx), fmt(ty)));
+    }
+    if let Some((sx, sy)) = s.scale
+        && (sx != 1.0 || sy != 1.0)
+    {
+        tf.push(format!("scale({},{})", fmt(sx), fmt(sy)));
+    }
+    if !tf.is_empty() {
+        out.push_str(&format!("transform:{};", tf.join(" ")));
     }
     if let Some(aspect) = s.aspect {
         out.push_str(&format!("aspect-ratio:{};", fmt(aspect)));
@@ -577,6 +915,22 @@ fn view_style(n: &Node, root: bool, parent: Option<&Node>, stretch: bool) -> Str
     out
 }
 
+/// CSS for a shape `<gradient>`. Android's angle is 0 = left→right, 90 =
+/// bottom→top; CSS is 0 = to top, 90 = to right.
+fn gradient_css(g: &crate::resources::Gradient) -> String {
+    let colors = g.colors.iter().map(|c| esc(c)).collect::<Vec<_>>().join(",");
+    match g.kind {
+        crate::resources::GradientKind::Linear => {
+            format!("linear-gradient({}deg,{colors})", fmt((90.0 - g.angle).rem_euclid(360.0)))
+        }
+        crate::resources::GradientKind::Radial => {
+            let (x, y) = g.center.unwrap_or((0.5, 0.5));
+            format!("radial-gradient(circle at {}% {}%,{colors})", fmt(x * 100.0), fmt(y * 100.0))
+        }
+        crate::resources::GradientKind::Sweep => format!("conic-gradient({colors})"),
+    }
+}
+
 /// Root size: the declared value, `match_parent` when the layout says nothing.
 fn push_root_size(out: &mut String, prop: &str, size: Option<Size>) {
     match size {
@@ -588,7 +942,8 @@ fn push_root_size(out: &mut String, prop: &str, size: Option<Size>) {
 }
 
 /// FrameLayout-style stacking anchor for one child inside a padded parent.
-fn push_frame_anchor(out: &mut String, g: Gravity, s: &Style, pad: &Edges) {
+/// Returns the centring transform to append, when the anchor centres the box.
+fn push_frame_anchor(out: &mut String, g: Gravity, s: &Style, pad: &Edges) -> Option<&'static str> {
     let match_w = s.width == Some(Size::Match);
     let match_h = s.height == Some(Size::Match);
     let (start, end, top, bottom) = (pad.start, pad.end, pad.top, pad.bottom);
@@ -619,19 +974,19 @@ fn push_frame_anchor(out: &mut String, g: Gravity, s: &Style, pad: &Edges) {
             _ => out.push_str(&format!("top:{}px;", fmt(top))),
         }
     }
-    if tx && ty {
-        out.push_str("transform:translate(-50%,-50%);");
-    } else if tx {
-        out.push_str("transform:translateX(-50%);");
-    } else if ty {
-        out.push_str("transform:translateY(-50%);");
+    match (tx, ty) {
+        (true, true) => Some("translate(-50%,-50%)"),
+        (true, false) => Some("translateX(-50%)"),
+        (false, true) => Some("translateY(-50%)"),
+        _ => None,
     }
 }
 
 /// Whether a container stacks children vertically (the flex column case).
 fn flex_column(node: &Node) -> bool {
     match node.kind.as_str() {
-        "HorizontalScrollView" | "LazyRow" => false,
+        "HorizontalScrollView" | "LazyRow" | "ChipGroup" | "TabLayout" | "BottomNavigationView" | "BottomAppBar"
+        | "Toolbar" | "SearchView" => false,
         "LinearLayout" => !matches!(node.style.flex_dir, Some(FlexDir::Row)),
         _ => true,
     }
@@ -871,6 +1226,36 @@ body { font-family:Roboto,"Segoe UI",sans-serif; background:#B7B4BD; color:#1B1B
   border-radius:6px; color:var(--ap-hint); font-size:11px; }
 .ap-list-empty { display:flex; flex:1 1 auto; align-items:center; justify-content:center;
   width:100%; min-height:96px; }
+.ap-toolbar-text { display:flex; flex-direction:column; margin-right:auto; overflow:hidden; }
+.ap-toolbar-title { font-weight:500; line-height:1.3; white-space:nowrap; overflow:hidden;
+  text-overflow:ellipsis; }
+.ap-toolbar-sub { font-size:12px; color:var(--ap-hint); white-space:nowrap; }
+.ap-toolbar-nav, .ap-action-icon, .ap-til-icon, .ap-nav-icon, .ap-fab-icon {
+  display:inline-block; width:24px; height:24px; flex:none; background-size:contain;
+  background-repeat:no-repeat; background-position:center; }
+.ap-toolbar-nav { margin-right:16px; }
+.ap-actions { display:flex; align-items:center; gap:8px; margin-left:auto; }
+.ap-action { display:inline-flex; align-items:center; gap:4px; font-size:14px; }
+.ap-til-label { font-size:12px; color:var(--ap-hint); margin-bottom:2px; }
+.ap-til-field { display:flex; align-items:center; gap:8px; min-height:32px; }
+.ap-search-icon { font-size:18px; color:var(--ap-hint); }
+.ap-search-hint { flex:1 1 auto; color:var(--ap-hint); font-size:16px; }
+.ap-tabs { display:flex; flex-direction:row; align-items:stretch; width:100%; overflow-x:auto; }
+.ap-tab { display:inline-flex; align-items:center; justify-content:center; padding:12px 16px;
+  font-size:14px; font-weight:500; color:var(--ap-hint); border-bottom:2px solid transparent;
+  white-space:nowrap; }
+.ap-tab.ap-tab-on { color:var(--ap-primary); border-bottom-color:var(--ap-primary); }
+.ap-nav-item { display:flex; flex-direction:column; align-items:center; justify-content:center;
+  gap:4px; flex:1 1 0; padding:8px 4px; color:inherit; }
+.ap-nav-label { font-size:12px; white-space:nowrap; }
+.ap-nav-rail { flex:0 0 auto; width:100%; }
+.ap-star { color:var(--ap-outline-variant); font-size:20px; line-height:1; }
+.ap-star.ap-star-on { color:#F2B01E; }
+.ap-stars { display:inline-flex; gap:2px; }
+.ap-caret { color:var(--ap-hint); margin-left:8px; }
+.ap-thumb { position:absolute; top:50%; width:14px; height:14px; margin:-7px 0 0 -7px;
+  border-radius:50%; background:var(--ap-primary); box-shadow:0 1px 3px rgba(0,0,0,.4); }
+.ap-fab-label { font-size:16px; font-weight:500; }
 "#;
 
 const JS: &str = r#"

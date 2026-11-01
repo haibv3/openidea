@@ -4080,6 +4080,7 @@ dependencies = [
  "ide-core",
  "libc",
  "serde",
+ "serde_json",
  "specta",
  "tempfile",
 ]
@@ -6157,6 +6158,7 @@ dependencies = [
 name = "openidea"
 version = "0.1.29"
 dependencies = [
+ "base64 0.22.1",
  "blake3",
  "dirs 6.0.0",
  "dunce",

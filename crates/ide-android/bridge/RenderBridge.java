@@ -3,7 +3,7 @@
  * Studio's preview pane uses (the real framework View/LayoutInflater shipped
  * in Android Studio's `layoutlib.jar`).
  *
- * STATUS: work in progress; not wired into the host yet.
+ * STATUS: experimental; used by the host's Android XML preview.
  *
  * Working (measured on D:/VF/VinfastSystemUI):
  *   - JNI bootstrap (libandroid_runtime.dll + layoutlib_jni.dll), ICU dat,
@@ -32,6 +32,7 @@
  * Experimental: framework enums, project IDs and unqualified project bitmap
  * drawables are handled. Missing XML resources are not replaced by invented
  * drawables. Theme and other resource resolution remain incomplete; not integrated.
+ * Session, render, missing-image and PNG encoding failures exit with an error.
  *
  * Usage: java -cp <layoutlib + layoutlib-api + sdk-common + kxml2 + guava +
  *        kotlin-stdlib + this class> RenderBridge <config.properties>
@@ -382,9 +383,17 @@ public final class RenderBridge {
         System.err.println("session status=" + sr.getStatus() + " msg=" + sr.getErrorMessage()
                 + " roots=" + (session.getRootViews() == null ? -1 : session.getRootViews().size()));
         if (sr.getException() != null) sr.getException().printStackTrace();
+        if (!sr.isSuccess()) {
+            session.dispose();
+            throw new IllegalStateException("Layoutlib session failed: " + sr.getErrorMessage(), sr.getException());
+        }
         System.err.println("hw=" + hw.getScreenWidth() + "x" + hw.getScreenHeight() + " density=" + hw.getDensity());
         Result res = session.render(5000);
         System.err.println("render=" + res.isSuccess() + " " + res.getStatus() + " " + res.getErrorMessage());
+        if (!res.isSuccess()) {
+            session.dispose();
+            throw new IllegalStateException("Layoutlib render failed: " + res.getErrorMessage(), res.getException());
+        }
         BufferedImage img = session.getImage();
         if (img == null) {
             RecyclableImage rec = session.getRecyclableImage();
@@ -393,11 +402,16 @@ public final class RenderBridge {
                 img = rec.getCopy();
             }
         }
-        if (img == null) { System.err.println("no image"); System.exit(2); }
-        javax.imageio.ImageIO.write(img, "png", new File(out));
+        if (img == null) {
+            session.dispose();
+            throw new IllegalStateException("Layoutlib produced no image");
+        }
+        if (!javax.imageio.ImageIO.write(img, "png", new File(out))) {
+            session.dispose();
+            throw new IOException("No PNG writer available");
+        }
         System.err.println("wrote " + out + " " + img.getWidth() + "x" + img.getHeight());
         session.dispose();
-        System.exit(res.isSuccess() ? 0 : 3);
     }
 
     /** Enum and flag values are required by layoutlib when parsing framework XML. */
@@ -507,57 +521,53 @@ public final class RenderBridge {
      */
     static final class StableResolver extends RenderResources {
         private final ResourceResolver inner;
+        private final StyleResourceValue baseTheme;
         private StyleResourceValue theme;
 
         StableResolver(ResourceResolver inner, StyleResourceValue theme) {
             this.inner = inner;
+            this.baseTheme = theme;
             this.theme = theme;
             inner.applyStyle(theme, true);
         }
 
         public void setLogger(ILayoutLog log) { inner.setLogger(log); }
-        public StyleResourceValue getDefaultTheme() { return theme; }
+        public StyleResourceValue getDefaultTheme() { return baseTheme; }
         public StyleResourceValue getTheme() { return theme; }
         public void applyStyle(StyleResourceValue style, boolean force) {
             if (style != null) theme = style;
         }
 
-        /** Walks the theme chain — the resolver's own theme state is empty. */
-        public ResourceValue findItemInTheme(ResourceReference ref) {
-            boolean probe = Boolean.getBoolean("lb.debug") && "colorPrimary".equals(ref.getName());
-            if (probe) System.err.println("SHIM-FIND colorPrimary ns=" + ref.getNamespace() + " theme=" + (theme == null ? null : theme.getName()));
-            // Library attrs live in RES_AUTO, framework ones in ANDROID; the
-            // caller's namespace depends on which R class it used.
+        /** Looks through the applied overlay and then the original application theme. */
+        private ResourceValue findThemeItem(ResourceReference ref) {
             ResourceReference[] refs = {
                 ref,
                 ResourceReference.attr(ResourceNamespace.RES_AUTO, ref.getName()),
                 ResourceReference.attr(ResourceNamespace.ANDROID, ref.getName()),
             };
-            StyleResourceValue t = theme;
-            for (int i = 0; i < 32 && t != null; i++) {
-                ResourceValue v = null;
-                for (ResourceReference r : refs) {
-                    v = inner.findItemInStyle(t, r);
-                    if (v != null) break;
-                }
-                if (v != null) {
-                    // `?attr/x` items resolve through the same chain.
-                    for (int d = 0; d < 8 && v.getValue() != null && v.getValue().startsWith("?"); d++) {
-                        String name = v.getValue().substring(v.getValue().lastIndexOf('/') + 1);
-                        ResourceValue next = null;
-                        for (StyleResourceValue c = theme; c != null && next == null; c = inner.getParent(c)) {
-                            next = inner.findItemInStyle(c, ResourceReference.attr(ref.getNamespace(), name));
-                        }
-                        if (next == null || next == v) break;
-                        v = next;
+            for (StyleResourceValue root : new StyleResourceValue[] { theme, baseTheme }) {
+                StyleResourceValue current = root;
+                for (int i = 0; i < 32 && current != null; i++) {
+                    for (ResourceReference candidate : refs) {
+                        ResourceValue value = inner.findItemInStyle(current, candidate);
+                        if (value != null) return value;
                     }
-                    if (probe) System.err.println("SHIM-FIND -> " + v);
-                    return v;
+                    current = inner.getParent(current);
                 }
-                t = inner.getParent(t);
             }
-            if (probe) System.err.println("SHIM-FIND -> null");
             return null;
+        }
+
+        public ResourceValue findItemInTheme(ResourceReference ref) {
+            ResourceValue value = findThemeItem(ref);
+            for (int i = 0; i < 8 && value != null && value.getValue() != null
+                    && value.getValue().startsWith("?"); i++) {
+                String name = value.getValue().substring(value.getValue().lastIndexOf('/') + 1);
+                ResourceValue next = findThemeItem(ResourceReference.attr(ref.getNamespace(), name));
+                if (next == null || next == value) break;
+                value = next;
+            }
+            return value;
         }
         public void clearStyles() { }
         public void clearAllThemes() { }

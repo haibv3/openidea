@@ -9,4 +9,11 @@
     <string name="profile_status">Working on the preview plugin</string>
     <string name="follow_label">Follow</string>
     <string name="note_sample_title">Sketch the layout preview toolbar</string>
+    <string name="menu_search">Search</string>
+    <string name="menu_settings">Settings</string>
+    <string name="form_email">Email</string>
+    <string name="form_password">Password</string>
+    <string name="chip_preview">Preview</string>
+    <string name="chip_layout">Layout</string>
+    <string name="section_material">Material components</string>
 </resources>

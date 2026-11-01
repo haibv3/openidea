@@ -3,27 +3,193 @@
 //! (insert-text requests, notifications) plus broadcasts (list/theme changes).
 
 use crate::state::AppState;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use ide_core::{CancellationToken, IdeError, IdeResult, RequestId};
 use ide_host::Host;
 use ide_plugin::{
     ActiveTheme, CatalogPlugin, Invocation, Limits, PluginEvent, PluginHost, PluginInfo, PluginsSnapshot,
-    PreviewOutput, PreviewRequest, RegistryPlugin, RegistryProgress,
+    PluginStatus, PreviewOutput, PreviewRequest, RegistryPlugin, RegistryProgress,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State, Window};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 /// How long `plugin_list` waits for the startup load before answering with what it has.
 const INITIAL_LOAD_WAIT: Duration = Duration::from_secs(5);
 
 /// Window label → its event channel.
 static SUBSCRIBERS: LazyLock<Mutex<HashMap<String, Channel<PluginEvent>>>> = LazyLock::new(Default::default);
+
+/// One render process (including compilation and model resolution) at a time.
+static ANDROID_RENDER: Mutex<()> = Mutex::new(());
+/// Trust is deliberately session-only and keyed by the canonical workspace.
+static ANDROID_TRUST: LazyLock<Mutex<HashSet<PathBuf>>> = LazyLock::new(Default::default);
+static ANDROID_GENERATION: AtomicU64 = AtomicU64::new(0);
+static ANDROID_PENDING: LazyLock<Mutex<HashMap<(String, String), u64>>> = LazyLock::new(Default::default);
+
+struct AndroidPending {
+    key: (String, String),
+    generation: u64,
+}
+
+impl Drop for AndroidPending {
+    fn drop(&mut self) {
+        let mut pending = ANDROID_PENDING.lock();
+        if pending.get(&self.key) == Some(&self.generation) {
+            pending.remove(&self.key);
+        }
+    }
+}
+
+fn android_layout_preview(
+    window: &Window,
+    host: &PluginHost,
+    root: &Path,
+    path: &str,
+    content: String,
+) -> IdeResult<String> {
+    let key = (window.label().to_owned(), path.to_owned());
+    let generation = ANDROID_GENERATION.fetch_add(1, Ordering::Relaxed);
+    ANDROID_PENDING.lock().insert(key.clone(), generation);
+    let pending = AndroidPending { key, generation };
+    let _render = ANDROID_RENDER.lock();
+    if ANDROID_PENDING.lock().get(&pending.key) != Some(&generation) {
+        return Err(IdeError::cancelled());
+    }
+    if content.len() > 2 * 1024 * 1024 {
+        return Err(IdeError::invalid("Android layout preview exceeds the 2 MiB input limit"));
+    }
+    let info = host.list(Some(root)).plugins.into_iter().find(|p| p.id == "android-preview")
+        .ok_or_else(|| IdeError::unavailable("android-preview plugin is not loaded for this workspace"))?;
+    if !info.enabled || info.status != PluginStatus::Active || !info.previews.iter().any(|p| p.id == "layout-xml") {
+        return Err(IdeError::unavailable("android-preview layout-xml provider is not active"));
+    }
+    let root = std::fs::canonicalize(root).map_err(|e| IdeError::invalid(format!("invalid workspace: {e}")))?;
+    let file = std::fs::canonicalize(path).map_err(|e| IdeError::invalid(format!("invalid layout path: {e}")))?;
+    let layout_dir = file.parent().and_then(Path::file_name).and_then(|n| n.to_str()).unwrap_or("");
+    let res_dir = file.parent().and_then(Path::parent).and_then(Path::file_name).and_then(|n| n.to_str());
+    if !file.is_file()
+        || !file.starts_with(&root)
+        || !file.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("xml"))
+        || !(layout_dir == "layout" || layout_dir.starts_with("layout-"))
+        || res_dir != Some("res")
+    {
+        return Err(IdeError::invalid("Android preview requires an XML file inside the workspace's res/layout* directory"));
+    }
+    if !ANDROID_TRUST.lock().contains(&root) {
+        let accepted = window.app_handle().dialog()
+            .message(format!("Rendering Android layouts may execute code from this workspace:\n\n{}\n\nThe JVM is not sandboxed. Only continue if you trust this project.", root.display()))
+            .title("Trust Android preview?")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::YesNo)
+            .parent(window)
+            .blocking_show();
+        if !accepted {
+            return Err(IdeError::unavailable("Android preview was not trusted"));
+        }
+        ANDROID_TRUST.lock().insert(root.clone());
+    }
+    let lib = ide_android::Layoutlib::discover()
+        .ok_or_else(|| IdeError::unavailable("Android Studio layoutlib was not found"))?;
+    let model = ide_android::resolve_preview_model(&root, &file, &content).map_err(IdeError::unavailable)?;
+    let label = format!("{} · {}", model.module, model.variant)
+        .replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        .replace('"', "&quot;").replace('\'', "&#39;");
+    let cache = window.app_handle().path().app_data_dir().map_err(join_err)?.join("layoutlib");
+    std::fs::create_dir_all(&cache).map_err(join_err)?;
+    let source = cache.join("RenderBridge.java");
+    std::fs::write(&source, ide_android::RENDER_BRIDGE_SOURCE).map_err(join_err)?;
+    let bridge = ide_android::compile_bridge(&lib, &source, &cache).map_err(IdeError::unavailable)?;
+    let request = ide_android::RenderRequest {
+        layout: file, content, namespace: model.namespace, res_dir: model.res_dir,
+        extra_res: model.extra_res, merged_dir: model.merged_dir, r_txt: model.r_txt,
+        app_apk: model.app_apk, classpath: model.classpath, platform: model.platform,
+        theme: model.theme, width: 420, height: 800,
+    };
+    let png = ide_android::render(&lib, &request, &bridge).map_err(IdeError::unavailable)?;
+    if png.len() > 5 * 1024 * 1024 || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err(IdeError::unavailable("Android preview returned an invalid or oversized PNG"));
+    }
+    Ok(format!("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body style=\"margin:0;background:#eee\"><div style=\"font:12px sans-serif;padding:6px\">Experimental Layoutlib · {label}</div><img alt=\"Android layout preview\" style=\"display:block;max-width:100%;height:auto\" src=\"data:image/png;base64,{}\"></body></html>", STANDARD.encode(png)))
+}
+
+fn android_compose_preview(
+    window: &Window,
+    host: &PluginHost,
+    root: &Path,
+    path: &str,
+    content: String,
+) -> IdeResult<String> {
+    let key = (window.label().to_owned(), path.to_owned());
+    let generation = ANDROID_GENERATION.fetch_add(1, Ordering::Relaxed);
+    ANDROID_PENDING.lock().insert(key.clone(), generation);
+    let pending = AndroidPending { key, generation };
+    let _render = ANDROID_RENDER.lock();
+    if ANDROID_PENDING.lock().get(&pending.key) != Some(&generation) {
+        return Err(IdeError::cancelled());
+    }
+    if content.len() > 2 * 1024 * 1024 {
+        return Err(IdeError::invalid("Android Compose preview exceeds the 2 MiB input limit"));
+    }
+    let info = host.list(Some(root)).plugins.into_iter().find(|p| p.id == "android-preview")
+        .ok_or_else(|| IdeError::unavailable("android-preview plugin is not loaded for this workspace"))?;
+    if !info.enabled || info.status != PluginStatus::Active || !info.previews.iter().any(|p| p.id == "compose") {
+        return Err(IdeError::unavailable("android-preview compose provider is not active"));
+    }
+    let root = std::fs::canonicalize(root).map_err(|e| IdeError::invalid(format!("invalid workspace: {e}")))?;
+    let file = std::fs::canonicalize(path).map_err(|e| IdeError::invalid(format!("invalid Kotlin path: {e}")))?;
+    if !file.is_file() || !file.starts_with(&root) || !file.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("kt")) {
+        return Err(IdeError::invalid("Android Compose preview requires a Kotlin file inside the workspace"));
+    }
+    let saved = std::fs::read_to_string(&file).map_err(|e| IdeError::invalid(format!("cannot read Kotlin file: {e}")))?;
+    if saved.replace("\r\n", "\n") != content.replace("\r\n", "\n") {
+        return Err(IdeError::unavailable("Save the Kotlin file before rendering its Compose preview"));
+    }
+    if !ANDROID_TRUST.lock().contains(&root) {
+        let accepted = window.app_handle().dialog()
+            .message(format!("Rendering Android Compose previews may execute code from this workspace:\n\n{}\n\nThe Android CLI and project code are not sandboxed. Only continue if you trust this project.", root.display()))
+            .title("Trust Android preview?")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::YesNo)
+            .parent(window)
+            .blocking_show();
+        if !accepted {
+            return Err(IdeError::unavailable("Android preview was not trusted"));
+        }
+        ANDROID_TRUST.lock().insert(root.clone());
+    }
+    let images = ide_android::render_compose_preview(&root, &file, &content).map_err(IdeError::unavailable)?;
+    if images.is_empty() {
+        return Err(IdeError::unavailable("Android Compose preview returned no images"));
+    }
+    let mut html = String::from("<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"></head><body style=\"margin:0;background:#eee\">");
+    let mut total = 0usize;
+    for (label, png) in images {
+        total = total.checked_add(png.len()).ok_or_else(|| IdeError::unavailable("Android Compose previews exceed the 5 MiB total image limit"))?;
+        if total > 5 * 1024 * 1024 || !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            return Err(IdeError::unavailable("Android Compose preview returned invalid or oversized PNGs"));
+        }
+        if label.len() > 4096 {
+            return Err(IdeError::unavailable("Android Compose preview label is too large"));
+        }
+        let label = label.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+            .replace('"', "&quot;").replace('\'', "&#39;");
+        html.push_str(&format!("<div style=\"font:12px sans-serif;padding:6px\">{label}</div><img alt=\"{label}\" style=\"display:block;max-width:100%;height:auto\" src=\"data:image/png;base64,{}\">", STANDARD.encode(png)));
+        if html.len() + "</body></html>".len() > 8 * 1024 * 1024 {
+            return Err(IdeError::unavailable("Android Compose preview HTML exceeds the 8 MiB limit"));
+        }
+    }
+    html.push_str("</body></html>");
+    Ok(html)
+}
 
 fn deliver(client: Option<&str>, event: PluginEvent) {
     let mut subs = SUBSCRIBERS.lock();
@@ -198,6 +364,16 @@ pub async fn plugin_render_preview(
     };
     let root = project.as_ref().map(|p| p.root.clone());
     let (plugin_id, html, background) = blocking(move || {
+        if plugin_id == "android-preview" && decl_id == "layout-xml" {
+            let root = root.as_deref().ok_or_else(|| IdeError::invalid("Android preview requires an open workspace"))?;
+            let html = android_layout_preview(&window, &host, root, &path, content)?;
+            return Ok((plugin_id, html, None));
+        }
+        if plugin_id == "android-preview" && decl_id == "compose" {
+            let root = root.as_deref().ok_or_else(|| IdeError::invalid("Android preview requires an open workspace"))?;
+            let html = android_compose_preview(&window, &host, root, &path, content)?;
+            return Ok((plugin_id, html, None));
+        }
         let (absolute, relative) = preview_paths(root.as_deref(), &path);
         let request = PreviewRequest { path: absolute, project_path: relative, decl: decl_id, content };
         let PreviewOutput { html, background } = host.render_preview(&plugin_id, request, invocation)?;

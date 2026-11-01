@@ -9,6 +9,7 @@
 //!
 //! Pure Rust, no host calls: fully unit-testable natively.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::xml;
@@ -22,6 +23,20 @@ pub trait ResourceSource {
     /// Raw bytes of a file (images). Text-only sources leave the default.
     fn read_bytes(&self, _path: &str) -> Option<Vec<u8>> {
         None
+    }
+    /// A UTF-8 file outside `res/`, project-relative (`app/src/main/AndroidManifest.xml`).
+    /// Needed for the app theme and for custom view superclasses; sources without
+    /// project access leave the default and those lookups degrade gracefully.
+    fn read_project(&self, _path: &str) -> Option<String> {
+        None
+    }
+    /// Entries of a project-relative directory (names only).
+    fn list_project(&self, _dir: &str) -> Vec<String> {
+        Vec::new()
+    }
+    /// Gradle module the previewed file belongs to (`app`), `""` for the root.
+    fn module(&self) -> &str {
+        ""
     }
     /// `values*/*.xml` contents, least authoritative first so a later file
     /// overrides an earlier one. Multi-root sources (module res plus merged
@@ -46,45 +61,119 @@ pub trait ResourceSource {
 
 /// A resolved `@drawable`/`@mipmap`: a parsed `<shape>`, an inline SVG built
 /// from a `<vector>`, or a `data:` URI wrapping a bitmap file.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ResDrawable {
     Shape(ShapeDrawable),
     Svg(String),
     Image(String),
 }
 
+/// How a `<gradient>` is painted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GradientKind {
+    #[default]
+    Linear,
+    Radial,
+    Sweep,
+}
+
+/// A `<gradient>` inside a `<shape>`: colours in document order (start,
+/// optional centre, end) plus the Android angle in degrees (0 = left→right,
+/// 90 = bottom→top).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Gradient {
+    pub kind: GradientKind,
+    pub angle: f32,
+    pub colors: Vec<String>,
+    /// Radial centre/radius as fractions of the drawable box.
+    pub center: Option<(f32, f32)>,
+    pub radius: Option<f32>,
+}
+
+/// One `<item>` of a `res/menu` file, title already resolved.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MenuItem {
+    pub title: String,
+    pub icon: Option<ResDrawable>,
+}
+
 /// An in-memory source for tests. Directory listings are derived from the
 /// registered file paths, so a test only needs to register files (extra empty
 /// directories can be declared with [`MemorySource::dir`]).
+#[cfg(any(test, not(target_arch = "wasm32")))]
 pub struct MemorySource {
     pub files: HashMap<String, String>,
     dirs: HashMap<String, Vec<String>>,
+    project: HashMap<String, String>,
+    module: String,
 }
 
+#[cfg(any(test, not(target_arch = "wasm32")))]
 impl MemorySource {
     pub fn new() -> Self {
-        Self { files: HashMap::new(), dirs: HashMap::new() }
+        Self { files: HashMap::new(), dirs: HashMap::new(), project: HashMap::new(), module: String::new() }
     }
 
+    #[cfg(test)]
     pub fn file(mut self, path: &str, content: &str) -> Self {
         self.files.insert(path.to_owned(), content.to_owned());
         self
     }
 
+    #[cfg(test)]
     pub fn dir(mut self, dir: &str, entries: &[&str]) -> Self {
         self.dirs.insert(dir.to_owned(), entries.iter().map(|s| s.to_string()).collect());
         self
     }
+
+    /// A file outside `res/` (manifest, Kotlin/Java sources), project-relative.
+    #[cfg(test)]
+    pub fn project_file(mut self, path: &str, content: &str) -> Self {
+        self.project.insert(path.to_owned(), content.to_owned());
+        self
+    }
+
+    #[cfg(test)]
+    pub fn module(mut self, module: &str) -> Self {
+        self.module = module.to_owned();
+        self
+    }
 }
 
+#[cfg(any(test, not(target_arch = "wasm32")))]
 impl Default for MemorySource {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(any(test, not(target_arch = "wasm32")))]
 impl ResourceSource for MemorySource {
     fn read(&self, path: &str) -> Option<String> {
         self.files.get(path).cloned()
+    }
+
+    fn read_project(&self, path: &str) -> Option<String> {
+        self.project.get(path).cloned()
+    }
+
+    fn list_project(&self, dir: &str) -> Vec<String> {
+        let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
+        let mut out: Vec<String> = Vec::new();
+        for path in self.project.keys() {
+            if let Some(rest) = path.strip_prefix(prefix.as_str()) {
+                let entry = rest.split('/').next().unwrap_or(rest);
+                if !entry.is_empty() && !out.iter().any(|e| e == entry) {
+                    out.push(entry.to_owned());
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    fn module(&self) -> &str {
+        &self.module
     }
 
     fn list(&self, dir: &str) -> Vec<String> {
@@ -147,16 +236,26 @@ pub fn theme_attr_css(name: &str) -> Option<&'static str> {
         | "textColorTertiary"
         | "colorControlNormal" => M3_ON_SURFACE_VARIANT,
         "outline" | "colorOutline" | "textColorHint" => M3_OUTLINE,
+        "outlineVariant" | "colorOutlineVariant" => M3_OUTLINE_VARIANT,
+        "colorPrimaryDark" | "colorPrimaryVariant" => "#4F378B",
+        "colorSecondaryVariant" => "#332D41",
+        "colorForeground" | "android:colorForeground" => M3_ON_SURFACE,
+        "colorButtonNormal" | "colorSwitchThumbNormal" => M3_SURFACE_VARIANT,
+        "colorEdgeEffect" | "colorControlHighlight" => "rgba(103,80,164,0.12)",
+        "colorLink" | "textColorLink" => M3_PRIMARY,
+        "editTextColor" => M3_ON_SURFACE,
+        "windowBackground" => M3_SURFACE,
+        "statusBarColor" | "navigationBarColor" => M3_SURFACE,
+        "colorOnSurfaceInverse" | "inverseOnSurface" => "#F2F2F2",
+        "colorSurfaceInverse" | "inverseSurface" => "#303030",
         "surfaceTint" => M3_PRIMARY,
-        "inverseSurface" => "#303030",
-        "inverseOnSurface" => "#F2F2F2",
         "surfaceDim" => "#DED8E1",
         "surfaceBright" => M3_SURFACE,
         "surfaceContainerLowest" => "#FFFFFF",
         "surfaceContainerLow" => "#F7F2FA",
         "surfaceContainerHigh" => "#ECE6F0",
         "surfaceContainerHighest" => "#E6E0E9",
-        "colorControlHighlight" | "dividerHorizontal" | "dividerVertical" => "rgba(0,0,0,0.12)",
+        "dividerHorizontal" | "dividerVertical" => "rgba(0,0,0,0.12)",
         "selectableItemBackground" | "selectableItemBackgroundBorderless" => "transparent",
         "textColorPrimaryInverse" => "#FFFFFF",
         _ => return None,
@@ -189,6 +288,49 @@ pub fn android_color(name: &str) -> Option<&'static str> {
         "primary_text_dark" => "#FFFFFFFF",
         "secondary_text_dark" => "#B3FFFFFF",
         "tertiary_text_dark" => "#80FFFFFF",
+        _ => return None,
+    })
+}
+
+/// `?attr/actionBarSize` and friends → the platform default in px. Layouts use
+/// these for toolbar/list heights; without them the value is dropped entirely.
+pub fn theme_attr_dimen(name: &str) -> Option<f32> {
+    let name = name.strip_prefix('?').unwrap_or(name).rsplit('/').next().unwrap_or(name);
+    Some(match name {
+        "actionBarSize" => 56.0,
+        "alertDialogTheme" => 0.0,
+        "listPreferredItemHeight" => 64.0,
+        "listPreferredItemHeightSmall" => 48.0,
+        "listPreferredItemHeightLarge" => 80.0,
+        "listPreferredItemPaddingLeft" | "listPreferredItemPaddingRight" => 16.0,
+        "listPreferredItemPaddingStart" | "listPreferredItemPaddingEnd" => 16.0,
+        "dropdownListPreferredItemHeight" => 48.0,
+        "textSize" => 14.0,
+        "statusBarHeight" => 24.0,
+        "navigationBarHeight" => 48.0,
+        "toolbarStyle" => 56.0,
+        "mtrl_toolbar_default_height" => 56.0,
+        "bottomAppBarHeight" | "mtrl_bottomappbar_height" => 80.0,
+        "chipMinHeight" | "mtrl_chip_min_height" => 32.0,
+        "textInputEditTextSize" => 16.0,
+        "dialogMinWidthMajor" | "dialogMinWidthMinor" => 0.0,
+        _ => return None,
+    })
+}
+
+/// A small built-in `@android:dimen/…` table.
+pub fn android_dimen(name: &str) -> Option<f32> {
+    Some(match name {
+        "status_bar_height" => 24.0,
+        "navigation_bar_height" => 48.0,
+        "app_icon_size" => 48.0,
+        "notification_large_icon_width" | "notification_large_icon_height" => 64.0,
+        "system_app_widget_background_radius" => 28.0,
+        "text_size_large" => 22.0,
+        "text_size_medium" => 18.0,
+        "text_size_small" => 14.0,
+        "dialog_min_width_major" | "dialog_min_width_minor" => 0.0,
+        "default_gap" => 8.0,
         _ => return None,
     })
 }
@@ -328,16 +470,61 @@ pub fn dimen_px(raw: &str) -> Option<f32> {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ShapeDrawable {
     pub fill: Option<String>,
+    /// Painted instead of `fill` when the shape declares a `<gradient>`.
+    pub gradient: Option<Gradient>,
     /// `[top-left, top-right, bottom-right, bottom-left]` in px.
     pub corners: [f32; 4],
     pub stroke: Option<(f32, String)>,
     /// `[left, top, right, bottom]` in px.
     pub padding: [f32; 4],
+    /// `<size>` intrinsic dimensions in px, when declared.
+    pub size: Option<(f32, f32)>,
+}
+
+impl ShapeDrawable {
+    /// Resolves every `?attr/…` colour through a theme (drawables are parsed
+    /// without one; the calling view supplies the theme it is inflated with).
+    pub fn resolve_theme(&mut self, resolve: impl Fn(&str) -> Option<String>) {
+        let fix = |slot: &mut Option<String>, resolve: &dyn Fn(&str) -> Option<String>| {
+            if let Some(v) = slot.take() {
+                *slot = Some(if v.starts_with('?') { resolve(&v).unwrap_or(v) } else { v });
+            }
+        };
+        fix(&mut self.fill, &resolve);
+        if let Some(stroke) = &mut self.stroke
+            && stroke.1.starts_with('?')
+        {
+            if let Some(c) = resolve(&stroke.1) {
+                stroke.1 = c;
+            }
+        }
+        if let Some(g) = &mut self.gradient {
+            for c in &mut g.colors {
+                if c.starts_with('?')
+                    && let Some(v) = resolve(c)
+                {
+                    *c = v;
+                }
+            }
+        }
+    }
 }
 
 struct StyleDef {
     parent: Option<String>,
     items: Vec<(String, String)>,
+}
+
+/// Themes declared in the module's `AndroidManifest.xml`. Android Studio
+/// previews against the app theme (or the activity's when the layout names one
+/// through `tools:context`), which is what makes `?attr/colorPrimary` show the
+/// app's brand colour instead of the M3 fallback.
+#[derive(Debug, Clone, Default)]
+pub struct ManifestThemes {
+    pub package: String,
+    pub application: Option<String>,
+    /// `activity android:name` → `android:theme`.
+    pub activities: Vec<(String, String)>,
 }
 
 /// Resolved resource tables for one render call.
@@ -352,6 +539,11 @@ pub struct Resources<'a> {
     layout_dirs: Vec<String>,
     drawable_dirs: Vec<String>,
     mipmap_dirs: Vec<String>,
+    color_dirs: Vec<String>,
+    menu_dirs: Vec<String>,
+    manifest: ManifestThemes,
+    /// Class → superclass cache for custom view resolution (project sources).
+    parents: RefCell<HashMap<String, Option<String>>>,
 }
 
 impl<'a> Resources<'a> {
@@ -371,6 +563,10 @@ impl<'a> Resources<'a> {
             layout_dirs: Vec::new(),
             drawable_dirs: Vec::new(),
             mipmap_dirs: Vec::new(),
+            color_dirs: Vec::new(),
+            menu_dirs: Vec::new(),
+            manifest: ManifestThemes::default(),
+            parents: RefCell::new(HashMap::new()),
         };
         // `values_files` orders the roots: merged library resources first,
         // the module's own `values/` last so it wins on ties. Only the
@@ -389,12 +585,56 @@ impl<'a> Resources<'a> {
                 res.drawable_dirs.push(entry);
             } else if entry.starts_with("mipmap") {
                 res.mipmap_dirs.push(entry);
+            } else if entry.starts_with("color") {
+                res.color_dirs.push(entry);
+            } else if entry.starts_with("menu") {
+                res.menu_dirs.push(entry);
             }
         }
         // `layout` itself first, so unqualified includes win over -land/-sw600dp.
         res.layout_dirs.sort_by_key(|d| (d != "layout", d.clone()));
         res.drawable_dirs.sort_by_key(|d| (d != "drawable", d.clone()));
+        res.color_dirs.sort_by_key(|d| (d != "color", d.clone()));
+        res.menu_dirs.sort_by_key(|d| (d != "menu", d.clone()));
+        res.manifest = res.read_manifest();
         res
+    }
+
+    /// `AndroidManifest.xml` of the module (or the project root): the app theme
+    /// and each activity's theme.
+    fn read_manifest(&self) -> ManifestThemes {
+        let module = self.source.module();
+        let prefix = if module.is_empty() { String::new() } else { format!("{module}/") };
+        let candidates = [
+            format!("{prefix}src/main/AndroidManifest.xml"),
+            format!("{prefix}AndroidManifest.xml"),
+            "src/main/AndroidManifest.xml".to_owned(),
+            "AndroidManifest.xml".to_owned(),
+        ];
+        let Some(text) = candidates.iter().find_map(|p| self.source.read_project(p)) else {
+            return ManifestThemes::default();
+        };
+        parse_manifest(&text)
+    }
+
+    /// The application theme reference (`@style/Theme.App`), if declared.
+    pub fn app_theme(&self) -> Option<&str> {
+        self.manifest.application.as_deref()
+    }
+
+    /// Theme of the activity named by `tools:context` (`.MainActivity`,
+    /// `com.x.MainActivity` or `MainActivity`).
+    pub fn activity_theme(&self, context: &str) -> Option<&str> {
+        let want = context.trim_start_matches('.');
+        let simple = want.rsplit('.').next().unwrap_or(want);
+        self.manifest
+            .activities
+            .iter()
+            .find(|(name, _)| {
+                let name = name.trim_start_matches('.');
+                name == want || name.rsplit('.').next() == Some(simple)
+            })
+            .map(|(_, theme)| theme.as_str())
     }
 
     /// Loads one `res/values*` file.
@@ -408,7 +648,7 @@ impl<'a> Resources<'a> {
             };
             match el.name_local() {
                 "string" => {
-                    self.strings.insert(name, el.text_content());
+                    self.strings.insert(name, decode_escapes(&el.text_content()));
                 }
                 "color" => {
                     self.colors.insert(name, el.direct_text());
@@ -442,6 +682,9 @@ impl<'a> Resources<'a> {
 
     /// `@string/x`, `@android:string/ok` or a literal.
     pub fn text(&self, raw: &str, depth: usize) -> Option<String> {
+        if raw == "@null" || raw == "@empty" {
+            return Some(String::new());
+        }
         if let Some(rest) = raw.strip_prefix("@android:string/") {
             return android_string(rest).map(str::to_owned);
         }
@@ -460,8 +703,13 @@ impl<'a> Resources<'a> {
     }
 
     /// `#hex`, `@color/x`, `@android:color/white`, `?attr/colorPrimary`.
+    /// A `@color/x` that is a state list (`res/color/x.xml`) resolves to its
+    /// default state, the one Android shows when a view is enabled and unfocused.
     pub fn color(&self, raw: &str, depth: usize) -> Option<String> {
         let raw = raw.trim();
+        if raw == "@null" {
+            return None;
+        }
         if raw.starts_with('#') {
             return color_css(raw);
         }
@@ -475,10 +723,38 @@ impl<'a> Resources<'a> {
             if depth > 8 {
                 return None;
             }
-            let v = self.colors.get(name)?.clone();
-            return self.color(&v, depth + 1);
+            if let Some(v) = self.colors.get(name) {
+                let v = v.clone();
+                return self.color(&v, depth + 1);
+            }
+            return self.color_state_list(name, depth + 1);
         }
         None
+    }
+
+    /// `res/color/<name>.xml`: a `<selector>` (or a bare `<color>` alias file).
+    fn color_state_list(&self, name: &str, depth: usize) -> Option<String> {
+        if depth > 8 {
+            return None;
+        }
+        let text = self.color_dirs.iter().find_map(|d| self.source.read(&format!("{d}/{name}.xml")))?;
+        let doc = xml::parse(&text).ok()?;
+        let root = doc.root?;
+        if root.name_local() == "color" {
+            return self.color(&root.direct_text(), depth + 1);
+        }
+        let items: Vec<&xml::Element> = root.elements().filter(|e| e.name_local() == "item").collect();
+        // The default state has no `android:state_*` filter; otherwise the first
+        // item (usually `state_pressed`) is the closest thing to a default.
+        let chosen = items
+            .iter()
+            .find(|e| !e.attrs.iter().any(|(n, _)| n.contains("state_")))
+            .or_else(|| items.first())?;
+        if let Some(shape) = chosen.elements().find(|e| e.name_local() == "shape") {
+            return parse_shape_with(&reserialize(shape), Some(self)).and_then(|s| s.fill);
+        }
+        let value = chosen.local("color")?;
+        self.color(value, depth + 1)
     }
 
     /// `14dp`, `@dimen/x` → px.
@@ -491,7 +767,26 @@ impl<'a> Resources<'a> {
             let v = self.dimens.get(name)?.clone();
             return self.dimen(&v, depth + 1);
         }
+        if let Some(name) = raw.strip_prefix("@android:dimen/") {
+            return android_dimen(name);
+        }
         dimen_px(raw)
+    }
+
+    /// `dimen` plus theme attributes (`?attr/actionBarSize`, or a dimen the
+    /// active theme defines itself).
+    pub fn dimen_in_theme(&self, raw: &str, theme: &[(String, String)], depth: usize) -> Option<f32> {
+        let raw = raw.trim();
+        if raw.starts_with('?') {
+            let name = raw.rsplit('/').next().unwrap_or(raw).trim_start_matches("attr/");
+            if depth <= 8
+                && let Some(v) = theme.iter().rev().find(|(n, _)| n == name).map(|(_, v)| v.clone())
+            {
+                return self.dimen_in_theme(&v, theme, depth + 1);
+            }
+            return theme_attr_dimen(raw);
+        }
+        self.dimen(raw, depth)
     }
 
     pub fn boolean(&self, raw: &str) -> Option<bool> {
@@ -501,6 +796,7 @@ impl<'a> Resources<'a> {
         parse_bool(raw)
     }
 
+    #[cfg(test)]
     pub fn integer(&self, raw: &str) -> Option<i64> {
         if let Some(name) = raw.strip_prefix("@integer/") {
             return self.integers.get(name).copied();
@@ -509,6 +805,7 @@ impl<'a> Resources<'a> {
     }
 
     /// Whether a layout name is available for `include` (`res/layout*/name.xml`).
+    #[cfg(test)]
     pub fn has_layout(&self, name: &str) -> bool {
         self.layout_dirs.iter().any(|d| self.source.read(&format!("{d}/{name}.xml")).is_some())
     }
@@ -518,16 +815,14 @@ impl<'a> Resources<'a> {
         self.layout_dirs.iter().find_map(|d| self.source.read(&format!("{d}/{name}.xml")))
     }
 
-    /// Parses `res/drawable*/<name>.xml` when it is a `<shape>` (or `<ripple>`,
-    /// `<layer-list>` — approximated by their first solid fill).
+    /// Parses `res/drawable*/<name>.xml` when it resolves to a `<shape>`,
+    /// looking through `<selector>`/`<ripple>`/`<layer-list>`/`<inset>` wrappers.
+    #[cfg(test)]
     pub fn drawable_shape(&self, name: &str) -> Option<ShapeDrawable> {
-        for dir in &self.drawable_dirs {
-            let Some(text) = self.source.read(&format!("{dir}/{name}.xml")) else { continue };
-            if let Some(shape) = parse_shape(&text) {
-                return Some(shape);
-            }
+        match self.drawable(name) {
+            Some(ResDrawable::Shape(shape)) => Some(shape),
+            _ => None,
         }
-        None
     }
 
     /// `?attr/x` looked up in the active theme (the `android:theme` style
@@ -555,25 +850,198 @@ impl<'a> Resources<'a> {
     /// `@drawable/x` / `@mipmap/x` → shape, vector (as inline SVG) or bitmap
     /// (as a `data:` URI). Searches `drawable*` then `mipmap*` directories.
     pub fn drawable(&self, name: &str) -> Option<ResDrawable> {
-        if let Some(shape) = self.drawable_shape(name) {
-            return Some(ResDrawable::Shape(shape));
+        self.drawable_at(name, 0)
+    }
+
+    fn drawable_at(&self, name: &str, depth: usize) -> Option<ResDrawable> {
+        if depth > 4 {
+            return None;
         }
         for dirs in [&self.drawable_dirs, &self.mipmap_dirs] {
             for dir in dirs {
-                for ext in ["xml", "png", "webp", "jpg", "jpeg", "gif"] {
-                    let path = format!("{dir}/{name}.{ext}");
-                    if ext == "xml" {
-                        if let Some(text) = self.source.read(&path) {
-                            if let Some(svg) = self.vector_svg(&text) {
-                                return Some(ResDrawable::Svg(svg));
-                            }
+                if let Some(text) = self.source.read(&format!("{dir}/{name}.xml"))
+                    && let Some(root) = xml::parse(&text).ok().and_then(|d| d.root)
+                    && let Some(out) = self.drawable_element(&root, depth)
+                {
+                    return Some(out);
+                }
+                for ext in ["png", "webp", "jpg", "jpeg", "gif"] {
+                    if let Some(bytes) = self.source.read_bytes(&format!("{dir}/{name}.{ext}"))
+                        && let Some(uri) = data_uri(&bytes, ext)
+                    {
+                        return Some(ResDrawable::Image(uri));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// One drawable element. Wrappers are unwrapped the way Android inflates
+    /// them: exactly one drawable comes out, so a preview shows the default
+    /// state of a selector and the topmost layer of a layer list.
+    fn drawable_element(&self, root: &xml::Element, depth: usize) -> Option<ResDrawable> {
+        if depth > 4 {
+            return None;
+        }
+        match root.name_local() {
+            "vector" => self.vector_svg(root).map(ResDrawable::Svg),
+            "shape" => parse_shape_element(root, Some(self)).map(ResDrawable::Shape),
+            "ripple" | "selector" | "level-list" | "transition" | "animated-vector" | "animation-list" => {
+                self.default_item(root, depth)
+            }
+            "layer-list" => {
+                let items: Vec<&xml::Element> = root.elements().filter(|e| e.name_local() == "item").collect();
+                items.iter().rev().find_map(|it| self.item_drawable(it, depth + 1))
+            }
+            "bitmap" | "scale" | "clip" | "rotate" | "inset" => {
+                let mut out = root.local("drawable").and_then(|d| self.drawable_ref(d, depth + 1))
+                    .or_else(|| root.elements().find_map(|e| self.drawable_element(e, depth + 1)));
+                if root.name_local() == "inset"
+                    && let Some(ResDrawable::Shape(shape)) = &mut out
+                {
+                    for (attr, idx) in [("insetLeft", 0), ("insetTop", 1), ("insetRight", 2), ("insetBottom", 3)] {
+                        if let Some(v) = root.local(attr).and_then(dimen_px) {
+                            shape.padding[idx] += v;
                         }
+                    }
+                }
+                out
+            }
+            "adaptive-icon" => {
+                let layer = |tag: &str| {
+                    root.elements()
+                        .find(|e| e.name_local() == tag)
+                        .and_then(|e| self.item_drawable(e, depth + 1))
+                };
+                // The foreground carries the recognisable artwork; a colour-only
+                // background still beats nothing.
+                layer("foreground").or_else(|| layer("background"))
+            }
+            _ => None,
+        }
+    }
+
+    /// The drawable of the default `<item>` (the one without state filters).
+    fn default_item(&self, root: &xml::Element, depth: usize) -> Option<ResDrawable> {
+        let items: Vec<&xml::Element> = root.elements().filter(|e| e.name_local() == "item").collect();
+        let chosen = items
+            .iter()
+            .find(|e| !e.attrs.iter().any(|(n, _)| n.contains("state_")))
+            .or_else(|| items.first())?;
+        self.item_drawable(chosen, depth)
+    }
+
+    fn item_drawable(&self, item: &xml::Element, depth: usize) -> Option<ResDrawable> {
+        if let Some(d) = item.local("drawable") {
+            return self.drawable_ref(d, depth + 1);
+        }
+        item.elements().find_map(|e| self.drawable_element(e, depth + 1))
+    }
+
+    /// A drawable reference: `@drawable/x`, `@mipmap/x`, or a bare colour, which
+    /// Android accepts anywhere a drawable is expected (it paints a solid box).
+    pub fn drawable_ref(&self, raw: &str, depth: usize) -> Option<ResDrawable> {
+        let raw = raw.trim();
+        if let Some(name) = raw.strip_prefix("@drawable/").or_else(|| raw.strip_prefix("@mipmap/")) {
+            return self.drawable_at(name, depth);
+        }
+        if raw == "@null" {
+            return None;
+        }
+        self.color(raw, depth)
+            .map(|c| ResDrawable::Shape(ShapeDrawable { fill: Some(c), ..Default::default() }))
+    }
+
+    /// Items of `res/menu/<name>.xml` (`app:menu` on toolbars, bottom bars and
+    /// navigation views), titles resolved and submenus flattened.
+    pub fn menu_items(&self, raw: &str) -> Vec<MenuItem> {
+        let name = raw.trim().trim_start_matches("@menu/");
+        let mut out = Vec::new();
+        if let Some(text) = self.menu_dirs.iter().find_map(|d| self.source.read(&format!("{d}/{name}.xml")))
+            && let Some(root) = xml::parse(&text).ok().and_then(|d| d.root)
+        {
+            self.menu_walk(&root, &mut out, 0);
+        }
+        out
+    }
+
+    fn menu_walk(&self, el: &xml::Element, out: &mut Vec<MenuItem>, depth: usize) {
+        if depth > 4 || out.len() >= 12 {
+            return;
+        }
+        for child in el.elements() {
+            match child.name_local() {
+                "group" => self.menu_walk(child, out, depth + 1),
+                "item" => {
+                    if let Some(sub) = child.elements().find(|e| e.name_local() == "menu") {
+                        self.menu_walk(sub, out, depth + 1);
                         continue;
                     }
-                    if let Some(bytes) = self.source.read_bytes(&path) {
-                        if let Some(uri) = data_uri(&bytes, ext) {
-                            return Some(ResDrawable::Image(uri));
-                        }
+                    let title = child
+                        .local("title")
+                        .map(|t| self.text(t, 0).unwrap_or_else(|| t.to_owned()))
+                        .unwrap_or_default();
+                    let icon = child.local("icon").and_then(|i| self.drawable_ref(i, 0));
+                    if !title.is_empty() || icon.is_some() {
+                        out.push(MenuItem { title, icon });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Superclass of a project class (`com.foo.MyView`), read from the module's
+    /// Kotlin/Java sources. Library classes have no source here, so they return
+    /// `None` and fall back to the name-suffix heuristic.
+    pub fn class_parent(&self, fqn: &str) -> Option<String> {
+        if let Some(hit) = self.parents.borrow().get(fqn) {
+            return hit.clone();
+        }
+        let found = self.find_class_source(fqn).and_then(|(text, simple)| parse_class_parent(&text, &simple));
+        self.parents.borrow_mut().insert(fqn.to_owned(), found.clone());
+        found
+    }
+
+    /// Locates the source declaring `fqn`: its conventional path first, then any
+    /// file of the package directory that mentions the class.
+    fn find_class_source(&self, fqn: &str) -> Option<(String, String)> {
+        let simple = fqn.rsplit('.').next()?.to_owned();
+        let rel = fqn.replace('.', "/");
+        let pkg_dir = rel.rsplit_once('/').map(|(p, _)| p).unwrap_or("").to_owned();
+        const SRC_DIRS: [&str; 4] = ["src/main/java", "src/main/kotlin", "src/java", "src/kotlin"];
+        let mut roots: Vec<String> = Vec::new();
+        let module = self.source.module();
+        if !module.is_empty() {
+            roots.push(module.to_owned());
+        }
+        roots.push(String::new());
+        for entry in self.source.list_project("") {
+            if !roots.contains(&entry) {
+                roots.push(entry);
+            }
+        }
+        for root in roots.into_iter().take(24) {
+            let prefix = if root.is_empty() { String::new() } else { format!("{root}/") };
+            for src in SRC_DIRS {
+                for ext in ["kt", "java"] {
+                    if let Some(text) = self.source.read_project(&format!("{prefix}{src}/{rel}.{ext}")) {
+                        return Some((text, simple.clone()));
+                    }
+                }
+                if pkg_dir.is_empty() {
+                    continue;
+                }
+                let dir = format!("{prefix}{src}/{pkg_dir}");
+                for entry in self.source.list_project(&dir).into_iter().take(32) {
+                    if !entry.ends_with(".kt") && !entry.ends_with(".java") {
+                        continue;
+                    }
+                    if let Some(text) = self.source.read_project(&format!("{dir}/{entry}"))
+                        && mentions_class(&text, &simple)
+                    {
+                        return Some((text, simple.clone()));
                     }
                 }
             }
@@ -582,16 +1050,14 @@ impl<'a> Resources<'a> {
     }
 
     /// `<vector>` → an inline SVG (paths and groups only; fills resolved).
-    fn vector_svg(&self, text: &str) -> Option<String> {
-        let doc = xml::parse(text).ok()?;
-        let root = doc.root?;
+    fn vector_svg(&self, root: &xml::Element) -> Option<String> {
         if root.name_local() != "vector" {
             return None;
         }
         let vw = root.attr("android:viewportWidth").and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(24.0);
         let vh = root.attr("android:viewportHeight").and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(24.0);
         let mut body = String::new();
-        vector_paths(&root, &mut body, self);
+        vector_paths(root, &mut body, self);
         if body.is_empty() {
             return None;
         }
@@ -627,6 +1093,239 @@ impl<'a> Resources<'a> {
             }
         }
         out.extend(style.items.iter().cloned());
+    }
+
+    /// Style names of `@style/X`, ancestors first and `X` last. Library styles
+    /// contribute their name even though their items live in an AAR, which is
+    /// how `Widget.Material3.Button.OutlinedButton` can be recognised without
+    /// the Material resources being available.
+    pub fn style_chain_names(&self, raw: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_style_names(&style_ref_name(raw), 0, &mut out);
+        out
+    }
+
+    fn collect_style_names(&self, name: &str, depth: usize, out: &mut Vec<String>) {
+        if depth > 8 || name.is_empty() {
+            return;
+        }
+        let parent = match self.styles.get(name) {
+            Some(style) => style.parent.clone().or_else(|| name.rsplit_once('.').map(|(p, _)| p.to_owned())),
+            None => name.rsplit_once('.').map(|(p, _)| p.to_owned()),
+        };
+        if let Some(parent) = parent
+            && !parent.is_empty()
+        {
+            self.collect_style_names(&parent, depth + 1, out);
+        }
+        out.push(name.to_owned());
+    }
+}
+
+/// Themes of `AndroidManifest.xml`: `<application android:theme>` plus every
+/// `<activity android:name android:theme>`.
+pub fn parse_manifest(xml_text: &str) -> ManifestThemes {
+    let mut out = ManifestThemes::default();
+    let Ok(doc) = xml::parse(xml_text) else { return out };
+    let Some(root) = doc.root else { return out };
+    if root.name_local() != "manifest" {
+        return out;
+    }
+    out.package = root.local("package").unwrap_or_default().to_owned();
+    for child in root.elements() {
+        if child.name_local() != "application" {
+            continue;
+        }
+        if let Some(theme) = child.local("theme") {
+            out.application = Some(theme.to_owned());
+        }
+        for inner in child.elements() {
+            if !matches!(inner.name_local(), "activity" | "activity-alias") {
+                continue;
+            }
+            let (Some(name), Some(theme)) = (inner.local("name"), inner.local("theme")) else { continue };
+            out.activities.push((expand_class_name(name, &out.package), theme.to_owned()));
+        }
+    }
+    out
+}
+
+/// `.MainActivity` → `com.example.MainActivity` (the manifest's shorthand).
+fn expand_class_name(name: &str, package: &str) -> String {
+    if name.starts_with('.') {
+        format!("{package}{name}")
+    } else if !name.contains('.') && !package.is_empty() {
+        format!("{package}.{name}")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// Decodes the escapes Android applies to `<string>` values (`\n`, `\t`,
+/// `\\`, `\'`, `\"`, `\uXXXX`) and strips a surrounding pair of quotes.
+pub fn decode_escapes(raw: &str) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] != '\\' || i + 1 >= chars.len() {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let next = chars[i + 1];
+        match next {
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            'u' if i + 5 < chars.len() => {
+                let hex: String = chars[i + 2..i + 6].iter().collect();
+                match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+                    Some(c) => {
+                        out.push(c);
+                        i += 6;
+                        continue;
+                    }
+                    None => out.push(next),
+                }
+            }
+            other => out.push(other),
+        }
+        i += 2;
+    }
+    let trimmed = out.trim();
+    if trimmed.len() >= 2 && trimmed.starts_with('"') && trimmed.ends_with('"') {
+        trimmed[1..trimmed.len() - 1].to_owned()
+    } else {
+        out
+    }
+}
+
+/// Whether `text` declares `class <simple>` (a cheap filter before parsing).
+fn mentions_class(text: &str, simple: &str) -> bool {
+    text.contains(&format!("class {simple}"))
+}
+
+/// The superclass of `class <simple>` in a Kotlin or Java source file, as a
+/// fully qualified name (imports and the file's package resolve a bare name).
+/// Returns `None` when the class has no declared superclass — which for a
+/// custom view means the source was not found in this project at all.
+pub fn parse_class_parent(text: &str, simple: &str) -> Option<String> {
+    let needle = format!("class {simple}");
+    // Word boundary: `class Button` must not match `class ButtonBar`.
+    let at = text.match_indices(&needle).find_map(|(i, _)| {
+        let next = text[i + needle.len()..].chars().next();
+        match next {
+            Some(c) if c.is_alphanumeric() || c == '_' => None,
+            _ => Some(i),
+        }
+    })?;
+    let after = &text[at + needle.len()..];
+    let imports = imports_of(text);
+    let package = text.lines().find_map(|l| {
+        let l = l.trim();
+        l.strip_prefix("package ")?.trim_end_matches(|c| c == ';' || c == '{').trim().split(';').next().map(str::to_owned)
+    });
+    let parent = kotlin_supertype(after).or_else(|| java_supertype(after))?;
+    let parent = parent.trim().trim_end_matches('{').trim();
+    if parent.is_empty() {
+        return None;
+    }
+    Some(qualify(parent, &imports, package.as_deref()))
+}
+
+/// `(...)  : Base(args), Iface { }` → `Base(args)` (Kotlin).
+fn kotlin_supertype(after: &str) -> Option<String> {
+    let chars: Vec<char> = after.chars().collect();
+    let mut i = 0;
+    let mut depth = 0i32;
+    while i < chars.len() {
+        match chars[i] {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            '{' if depth <= 0 => return None,
+            ':' if depth <= 0 => {
+                let rest: String = chars[i + 1..].iter().collect();
+                return first_supertype(&rest);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `... extends Base<Iface> implements X {` → `Base` (Java).
+fn java_supertype(after: &str) -> Option<String> {
+    let end = after.find('{').unwrap_or(after.len());
+    let head = &after[..end];
+    let at = head.find(" extends ")?;
+    let rest = &head[at + " extends ".len()..];
+    let token: String = rest
+        .trim()
+        .chars()
+        .take_while(|c| !matches!(c, '<' | ',' | ' ' | '\t' | '\n'))
+        .collect();
+    if token.is_empty() { None } else { Some(token) }
+}
+
+/// The first entry of a Kotlin supertype list, without generics or constructor
+/// arguments (`Base(args)` → `Base`).
+fn first_supertype(rest: &str) -> Option<String> {
+    let mut depth = 0i32;
+    let mut out = String::new();
+    for c in rest.chars() {
+        match c {
+            '<' | '(' | '[' => {
+                depth += 1;
+                continue;
+            }
+            '>' | ')' | ']' => {
+                depth -= 1;
+                continue;
+            }
+            ',' | '{' if depth <= 0 => break,
+            _ => {}
+        }
+        if depth <= 0 {
+            out.push(c);
+        }
+    }
+    let out = out.trim().to_owned();
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// `import a.b.C` / `import a.b.C as D` / `import a.b.*` → simple name → FQN.
+fn imports_of(text: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("import ") else { continue };
+        let rest = rest.trim_end_matches(';').trim();
+        let (path, alias) = match rest.split_once(" as ") {
+            Some((p, a)) => (p.trim(), a.trim()),
+            None => (rest, ""),
+        };
+        if path.ends_with(".*") {
+            continue;
+        }
+        let key = if alias.is_empty() { path.rsplit('.').next().unwrap_or(path) } else { alias };
+        map.insert(key.to_owned(), path.to_owned());
+    }
+    map
+}
+
+/// Resolves a bare superclass name through the file's imports, else its package.
+fn qualify(name: &str, imports: &HashMap<String, String>, package: Option<&str>) -> String {
+    if name.contains('.') {
+        return name.to_owned();
+    }
+    if let Some(fqn) = imports.get(name) {
+        return fqn.clone();
+    }
+    match package {
+        Some(p) if !p.is_empty() => format!("{p}.{name}"),
+        _ => name.to_owned(),
     }
 }
 
@@ -665,88 +1364,113 @@ fn style_ref_name(raw: &str) -> String {
     raw.trim().trim_start_matches("@android:style/").trim_start_matches("@style/").to_owned()
 }
 
-/// Parses a shape drawable XML subset: `<shape>` with `<solid>`, `<corners>`,
-/// `<stroke>`, `<padding>`; `<gradient>` degrades to its start color.
-pub fn parse_shape(xml_text: &str) -> Option<ShapeDrawable> {
+/// Parses a shape drawable XML subset: `<shape>` with `<solid>`, `<gradient>`,
+/// `<corners>`, `<stroke>`, `<padding>` and `<size>`. Wrapper elements
+/// (`<ripple>`, `<layer-list>`, `<inset>`, `<selector>`) yield the first nested
+/// shape they contain. `@color/…` references resolve through `res`; `?attr/…`
+/// is kept verbatim for the caller to resolve against the inflating theme
+/// ([`ShapeDrawable::resolve_theme`]).
+pub fn parse_shape_with(xml_text: &str, res: Option<&Resources>) -> Option<ShapeDrawable> {
     let doc = xml::parse(xml_text).ok()?;
     let root = doc.root?;
+    parse_shape_element(&root, res)
+}
+
+/// [`parse_shape_with`] for an already-parsed element.
+pub fn parse_shape_element(root: &xml::Element, res: Option<&Resources>) -> Option<ShapeDrawable> {
+    let color_of = |v: &str| -> Option<String> {
+        if v.trim().starts_with('?') {
+            return Some(v.trim().to_owned());
+        }
+        match res {
+            Some(r) => r.color(v, 0),
+            None => color_css(v),
+        }
+    };
     match root.name_local() {
-        "shape" | "ripple" | "layer-list" | "inset" => {}
+        "shape" => {}
+        "ripple" | "layer-list" | "inset" | "selector" | "level-list" => {
+            // Fall back to the first nested shape: `res`-backed callers resolve
+            // wrappers properly (`Resources::drawable_element`), this is for
+            // standalone parsing.
+            return root.elements().find_map(|el| {
+                if el.name_local() == "shape" {
+                    parse_shape_element(el, res)
+                } else {
+                    el.elements().find_map(|inner| parse_shape_element(inner, res))
+                }
+            });
+        }
         _ => return None,
     }
     let mut shape = ShapeDrawable { corners: [0.0; 4], padding: [0.0; 4], ..Default::default() };
-    fn corners_from(el: &xml::Element, out: &mut [f32; 4]) {
-        if let Some(r) = el.local("radius").and_then(dimen_px) {
-            *out = [r; 4];
-        }
-        for (attr, idx) in
-            [("topLeftRadius", 0), ("topRightRadius", 1), ("bottomRightRadius", 2), ("bottomLeftRadius", 3)]
-        {
-            if let Some(v) = el.local(attr).and_then(dimen_px) {
-                out[idx] = v;
-            }
-        }
-    }
-    match root.name_local() {
-        "shape" => {
-            if let Some(solid) = root.elements().find(|e| e.name_local() == "solid") {
-                if let Some(c) = solid.local("color") {
-                    shape.fill = color_css(c).or_else(|| Some(c.to_owned()).filter(|_| c.starts_with('?')));
+    for el in root.elements() {
+        match el.name_local() {
+            "solid" => {
+                if let Some(c) = el.local("color").and_then(|c| color_of(c)) {
+                    shape.fill = Some(c);
                 }
             }
-            for el in root.elements() {
-                match el.name_local() {
-                    "corners" => corners_from(el, &mut shape.corners),
-                    "stroke" => {
-                        let w = el.local("width").and_then(dimen_px).unwrap_or(1.0);
-                        let c = el
-                            .local("color")
-                            .map(|c| color_css(c).unwrap_or_else(|| "#000000".to_owned()))
-                            .unwrap_or_else(|| "#000000".to_owned());
-                        shape.stroke = Some((w, c));
-                    }
-                    "padding" => {
-                        shape.padding[0] = el.local("left").and_then(dimen_px).unwrap_or(0.0);
-                        shape.padding[1] = el.local("top").and_then(dimen_px).unwrap_or(0.0);
-                        shape.padding[2] = el.local("right").and_then(dimen_px).unwrap_or(0.0);
-                        shape.padding[3] = el.local("bottom").and_then(dimen_px).unwrap_or(0.0);
-                    }
-                    "gradient" => {
-                        if shape.fill.is_none() {
-                            shape.fill = el
-                                .local("startColor")
-                                .and_then(|c| color_css(c).or(Some(c.to_owned()).filter(|_| c.starts_with('?'))));
-                        }
-                    }
-                    _ => {}
+            "corners" => {
+                if let Some(r) = el.local("radius").and_then(dimen_px) {
+                    shape.corners = [r; 4];
                 }
-            }
-        }
-        "ripple" => {
-            shape.fill = None;
-            for el in root.elements() {
-                if el.name_local() == "item" {
-                    for inner in el.elements() {
-                        if inner.name_local() == "shape" {
-                            if let Some(sub) = parse_shape(&reserialize(inner)) {
-                                return Some(sub);
-                            }
-                        }
+                for (attr, idx) in
+                    [("topLeftRadius", 0), ("topRightRadius", 1), ("bottomRightRadius", 2), ("bottomLeftRadius", 3)]
+                {
+                    if let Some(v) = el.local(attr).and_then(dimen_px) {
+                        shape.corners[idx] = v;
                     }
                 }
             }
-        }
-        // layer-list / inset: use the first drawable child if any.
-        _ => {
-            for el in root.elements() {
-                for inner in el.elements() {
-                    if inner.name_local() == "shape" {
-                        if let Some(sub) = parse_shape(&reserialize(inner)) {
-                            return Some(sub);
-                        }
-                    }
+            "stroke" => {
+                let w = el.local("width").and_then(dimen_px).unwrap_or(1.0);
+                let c = el.local("color").and_then(|c| color_of(c)).unwrap_or_else(|| "#000000".to_owned());
+                shape.stroke = Some((w, c));
+            }
+            "padding" => {
+                shape.padding[0] = el.local("left").and_then(dimen_px).unwrap_or(0.0);
+                shape.padding[1] = el.local("top").and_then(dimen_px).unwrap_or(0.0);
+                shape.padding[2] = el.local("right").and_then(dimen_px).unwrap_or(0.0);
+                shape.padding[3] = el.local("bottom").and_then(dimen_px).unwrap_or(0.0);
+            }
+            "size" => {
+                let w = el.local("width").and_then(dimen_px);
+                let h = el.local("height").and_then(dimen_px);
+                if w.is_some() || h.is_some() {
+                    shape.size = Some((w.unwrap_or(0.0), h.unwrap_or(0.0)));
                 }
             }
+            "gradient" => {
+                let mut colors = Vec::new();
+                for attr in ["startColor", "centerColor", "endColor"] {
+                    if let Some(c) = el.local(attr).and_then(|c| color_of(c)) {
+                        colors.push(c);
+                    }
+                }
+                if colors.len() >= 2 {
+                    shape.gradient = Some(Gradient {
+                        kind: match el.local("type").map(str::trim) {
+                            Some("radial") => GradientKind::Radial,
+                            Some("sweep") => GradientKind::Sweep,
+                            _ => GradientKind::Linear,
+                        },
+                        angle: el.local("angle").and_then(|v| v.trim().parse::<f32>().ok()).unwrap_or(0.0),
+                        colors,
+                        center: match (
+                            el.local("centerX").and_then(|v| v.trim().parse::<f32>().ok()),
+                            el.local("centerY").and_then(|v| v.trim().parse::<f32>().ok()),
+                        ) {
+                            (Some(x), Some(y)) => Some((x, y)),
+                            _ => None,
+                        },
+                        radius: el.local("gradientRadius").and_then(dimen_px),
+                    });
+                } else if shape.fill.is_none() {
+                    shape.fill = colors.into_iter().next();
+                }
+            }
+            _ => {}
         }
     }
     Some(shape)
@@ -772,6 +1496,10 @@ fn reserialize(el: &xml::Element) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn res(src: MemorySource) -> Resources<'static> {
+        Resources::new(Box::leak(Box::new(src)))
+    }
 
     fn values_res() -> Resources<'static> {
         // Leaked for convenience in tests; fine for the test binary.
@@ -976,6 +1704,197 @@ mod tests {
         assert_eq!(theme_attr_css("?android:attr/textColorPrimary"), Some(M3_ON_SURFACE));
         assert_eq!(theme_attr_css("?colorOnSurfaceVariant"), Some(M3_ON_SURFACE_VARIANT));
         assert_eq!(theme_attr_css("?attr/nopeNope"), None);
+        assert_eq!(theme_attr_dimen("?attr/actionBarSize"), Some(56.0));
+        assert_eq!(android_dimen("status_bar_height"), Some(24.0));
+    }
+
+    #[test]
+    fn manifest_theme_and_activity_themes() {
+        let src = MemorySource::new()
+            .module("app")
+            .project_file(
+                "app/src/main/AndroidManifest.xml",
+                r#"<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.example.app">
+                    <application android:theme="@style/Theme.App">
+                        <activity android:name=".MainActivity" android:theme="@style/Theme.Main"/>
+                        <activity android:name="com.example.app.OtherActivity"/>
+                    </application>
+                </manifest>"#,
+            )
+            .file(
+                "values/themes.xml",
+                r#"<resources>
+                    <style name="Theme.App" parent="Theme.Material3.DayNight.NoActionBar">
+                        <item name="colorPrimary">#FF123456</item>
+                    </style>
+                    <style name="Theme.Main" parent="Theme.App">
+                        <item name="colorPrimary">#FF654321</item>
+                    </style>
+                </resources>"#,
+            );
+        let r = res(src);
+        assert_eq!(r.app_theme(), Some("@style/Theme.App"));
+        assert_eq!(r.activity_theme(".MainActivity"), Some("@style/Theme.Main"));
+        assert_eq!(r.activity_theme("com.example.app.MainActivity"), Some("@style/Theme.Main"));
+        assert_eq!(r.activity_theme("OtherActivity"), None);
+        let get = |theme: &str, name: &str| {
+            r.theme_attrs(theme).into_iter().find(|(n, _)| n == name).map(|(_, v)| v)
+        };
+        assert_eq!(get("@style/Theme.App", "colorPrimary").as_deref(), Some("#FF123456"));
+        assert_eq!(get("@style/Theme.Main", "colorPrimary").as_deref(), Some("#FF654321"));
+    }
+
+    #[test]
+    fn color_state_lists_use_the_default_state() {
+        let src = MemorySource::new()
+            .file(
+                "color/text_primary.xml",
+                r##"<selector>
+                    <item android:state_pressed="true" android:color="#FFFF0000"/>
+                    <item android:color="#FF222222"/>
+                </selector>"##,
+            )
+            .file(
+                "values/colors.xml",
+                r##"<resources><color name="alias">@color/text_primary</color></resources>"##,
+            );
+        let r = res(src);
+        assert_eq!(r.color("@color/text_primary", 0).as_deref(), Some("#222222"));
+        assert_eq!(r.color("@color/alias", 0).as_deref(), Some("#222222"));
+    }
+
+    #[test]
+    fn selectors_gradients_and_adaptive_icons_resolve() {
+        let src = MemorySource::new()
+            .file(
+                "drawable/btn.xml",
+                r##"<selector>
+                    <item android:state_enabled="false" android:drawable="@drawable/bg_grad"/>
+                    <item android:drawable="@drawable/bg_grad"/>
+                </selector>"##,
+            )
+            .file(
+                "drawable/bg_grad.xml",
+                r##"<shape>
+                    <gradient android:startColor="#FF0000" android:centerColor="#00FF00"
+                        android:endColor="#0000FF" android:angle="90" android:type="linear"/>
+                    <corners android:radius="8dp"/>
+                </shape>"##,
+            )
+            .file(
+                "drawable/ic_launcher.xml",
+                r##"<adaptive-icon>
+                    <background android:drawable="@color/ic_bg"/>
+                    <foreground android:drawable="@drawable/bg_grad"/>
+                </adaptive-icon>"##,
+            )
+            .file(
+                "drawable/inset_bg.xml",
+                r##"<inset android:insetLeft="4dp" android:drawable="@drawable/bg_grad"/>"##,
+            )
+            .file("values/colors.xml", r##"<resources><color name="ic_bg">#FF00FF00</color></resources>"##);
+        let r = res(src);
+        // `<selector>` → default item → shape, gradient preserved.
+        let shape = r.drawable_shape("btn").expect("shape through selector");
+        let g = shape.gradient.as_ref().expect("gradient");
+        assert_eq!(g.colors, ["#FF0000", "#00FF00", "#0000FF"]);
+        assert_eq!(g.kind, GradientKind::Linear);
+        assert_eq!(g.angle, 90.0);
+        assert_eq!(shape.corners, [8.0; 4]);
+        // `<inset>` adds padding around the drawable it wraps.
+        let inset = r.drawable_shape("inset_bg").expect("inset");
+        assert_eq!(inset.padding[0], 4.0);
+        // Adaptive icons unwrap to the foreground artwork.
+        let icon = r.drawable("ic_launcher").expect("adaptive icon");
+        assert!(matches!(icon, ResDrawable::Shape(s) if s.gradient.is_some()));
+    }
+
+    #[test]
+    fn menu_resources_resolve_titles_and_icons() {
+        let src = MemorySource::new()
+            .file(
+                "values/strings.xml",
+                r#"<resources><string name="save">Save</string></resources>"#,
+            )
+            .file(
+                "menu/main.xml",
+                r##"<menu xmlns:android="http://schemas.android.com/apk/res/android">
+                    <item android:id="@+id/save" android:title="@string/save" android:icon="@drawable/ic_add"/>
+                    <group><item android:title="Delete"/></group>
+                    <item android:title="More"><menu><item android:title="Settings"/></menu></item>
+                </menu>"##,
+            )
+            .file(
+                "drawable/ic_add.xml",
+                r##"<vector android:viewportWidth="24" android:viewportHeight="24"><path android:pathData="M0,0h24v24h-24z" android:fillColor="#FF000000"/></vector>"##,
+            );
+        let r = res(src);
+        let items = r.menu_items("@menu/main");
+        let titles: Vec<&str> = items.iter().map(|i| i.title.as_str()).collect();
+        assert_eq!(titles, ["Save", "Delete", "Settings"]);
+        assert!(matches!(items[0].icon, Some(ResDrawable::Svg(_))));
+    }
+
+    #[test]
+    fn custom_class_superclasses_come_from_project_sources() {
+        let src = MemorySource::new()
+            .module("app")
+            .project_file(
+                "app/src/main/java/com/example/ui/BrandButton.kt",
+                r#"package com.example.ui
+
+import androidx.appcompat.widget.AppCompatButton
+
+class BrandButton(context: Context) : AppCompatButton(context) { }
+"#,
+            )
+            .project_file(
+                "app/src/main/java/com/example/ui/Widgets.kt",
+                r#"package com.example.ui
+
+class Panel : androidx.constraintlayout.widget.ConstraintLayout { }
+"#,
+            )
+            .project_file(
+                "app/src/main/java/com/example/ui/NoteRow.java",
+                r#"package com.example.ui;
+
+import android.widget.LinearLayout;
+
+public class NoteRow extends LinearLayout implements Runnable {
+    public void run() { }
+}
+"#,
+            );
+        let r = res(src);
+        assert_eq!(
+            r.class_parent("com.example.ui.BrandButton").as_deref(),
+            Some("androidx.appcompat.widget.AppCompatButton")
+        );
+        // Declared in a differently-named file of the same package.
+        assert_eq!(
+            r.class_parent("com.example.ui.Panel").as_deref(),
+            Some("androidx.constraintlayout.widget.ConstraintLayout")
+        );
+        assert_eq!(r.class_parent("com.example.ui.NoteRow").as_deref(), Some("android.widget.LinearLayout"));
+        assert_eq!(r.class_parent("com.example.ui.Missing"), None);
+    }
+
+    #[test]
+    fn class_parent_parsing_handles_generics_and_java() {
+        let kotlin = "package a.b\nimport android.widget.FrameLayout\nclass Panel<T>(c: Context) : FrameLayout(c), Runnable { }";
+        assert_eq!(parse_class_parent(kotlin, "Panel").as_deref(), Some("android.widget.FrameLayout"));
+        let java = "package a.b;\nimport android.widget.FrameLayout;\npublic class Panel extends FrameLayout implements Runnable { }";
+        assert_eq!(parse_class_parent(java, "Panel").as_deref(), Some("android.widget.FrameLayout"));
+        // A different class with the same prefix must not match.
+        assert_eq!(parse_class_parent("class PanelRow : View { }", "Panel"), None);
+    }
+
+    #[test]
+    fn android_string_escapes_decode() {
+        assert_eq!(decode_escapes(r"Line\nNext\tTab \\ \'q\'"), "Line\nNext\tTab \\ 'q'");
+        assert_eq!(decode_escapes("\"quoted\""), "quoted");
+        assert_eq!(decode_escapes("plain"), "plain");
     }
 }
 

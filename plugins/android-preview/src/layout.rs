@@ -29,6 +29,11 @@ impl<'a> Ctx<'a> {
         self.res.color_in_theme(raw, &self.theme, 0)
     }
 
+    /// A dimension that may be a theme attribute (`?attr/actionBarSize`).
+    fn dimen(&self, raw: &str) -> Option<f32> {
+        self.res.dimen_in_theme(raw, &self.theme, 0)
+    }
+
     /// Same context under a different theme.
     fn with_theme(&self, theme_ref: &str) -> Ctx<'a> {
         Ctx { res: self.res, theme: Rc::new(self.res.theme_attrs(theme_ref)) }
@@ -41,6 +46,14 @@ impl<'a> Ctx<'a> {
 pub enum Image {
     Svg(String),
     Uri(String),
+}
+
+/// One menu/tab entry (`app:menu`, `<TabItem>`, Material navigation bars).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MenuItem {
+    pub label: String,
+    pub icon: Option<Image>,
+    pub checked: bool,
 }
 
 /// Preview device viewport (dp → px 1:1).
@@ -139,7 +152,7 @@ pub struct RelRules {
     pub center: bool,
 }
 
-/// ConstraintLayout rules of one child (or a guideline).
+/// ConstraintLayout rules of one child (or a guideline/barrier).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConRules {
     pub top_to_top: Option<Anchor>,
@@ -156,6 +169,20 @@ pub struct ConRules {
     pub height_percent: Option<f32>,
     /// `layout_dimensionRatio` as `(w, h)`.
     pub ratio: Option<(f32, f32)>,
+    /// Which side the ratio derives: `true` = width (`"W,16:9"`), `false` =
+    /// height (`"H,16:9"`). Absent means "whichever side is not decided".
+    pub ratio_side: Option<bool>,
+    /// `layout_constraintCircle`: `(target id, radius px, angle deg)`.
+    pub circle: Option<(String, f32, f32)>,
+    pub width_min: Option<f32>,
+    pub width_max: Option<f32>,
+    pub height_min: Option<f32>,
+    pub height_max: Option<f32>,
+    /// Margins that replace the normal ones when the anchor is `gone`.
+    pub gone_start: Option<f32>,
+    pub gone_end: Option<f32>,
+    pub gone_top: Option<f32>,
+    pub gone_bottom: Option<f32>,
     pub guide_begin: Option<f32>,
     pub guide_end: Option<f32>,
     pub guide_percent: Option<f32>,
@@ -163,6 +190,18 @@ pub struct ConRules {
     /// the view has no constraints.
     pub editor_x: Option<f32>,
     pub editor_y: Option<f32>,
+    /// `Barrier` helper: which edge of the referenced views it sits on.
+    pub barrier_direction: Option<BarrierDir>,
+    /// `constraint_referenced_ids` (Barrier / Group / Flow).
+    pub referenced_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarrierDir {
+    Start,
+    End,
+    Top,
+    Bottom,
 }
 
 impl ConRules {
@@ -194,6 +233,8 @@ pub struct Node {
     pub hint: Option<String>,
     /// Secondary payload: placeholder/drawable/expression label.
     pub sub: Option<String>,
+    /// Menu / tab entries (`app:menu`, `<TabItem>` children, Material bars).
+    pub items: Vec<MenuItem>,
     pub style: Style,
     pub children: Vec<Node>,
 }
@@ -275,6 +316,39 @@ pub struct Style {
     pub offset: Option<(f32, f32)>,
     /// Vertical divider (Compose `VerticalDivider`).
     pub vertical: bool,
+    /// `android:minWidth` / `minHeight` / `maxWidth` / `maxHeight` in px.
+    pub min_width: Option<f32>,
+    pub min_height: Option<f32>,
+    pub max_width: Option<f32>,
+    pub max_height: Option<f32>,
+    /// `android:enabled="false"` dims the view like Android does.
+    pub enabled: Option<bool>,
+    /// `android:translationX/Y` in px.
+    pub translation: Option<(f32, f32)>,
+    /// `android:scaleX/Y`.
+    pub scale: Option<(f32, f32)>,
+    /// Compound drawables (`android:drawableStart` …).
+    pub drawable_start: Option<Image>,
+    pub drawable_end: Option<Image>,
+    pub drawable_padding: Option<f32>,
+    /// Raw `lineSpacingExtra` / `lineSpacingMultiplier`, combined with the
+    /// final font size once every attribute has been seen.
+    pub line_spacing_extra: Option<f32>,
+    pub line_spacing_mult: Option<f32>,
+    /// `android:textFontWeight` (100–900).
+    pub font_weight: Option<u32>,
+    /// Progress/seek/switch paints.
+    pub progress_tint: Option<String>,
+    pub track_tint: Option<String>,
+    pub thumb_tint: Option<String>,
+    /// `TextInputLayout` with `app:boxBackgroundMode="outline"`.
+    pub outlined: bool,
+    /// `android:singleLine="true"`.
+    pub single_line: bool,
+    /// `android:foreground` when it resolves to a colour.
+    pub foreground: Option<String>,
+    /// Number of `RatingBar` stars and the shown rating.
+    pub rating: Option<(f32, f32)>,
     pub rel: RelRules,
     pub con: ConRules,
 }
@@ -292,9 +366,15 @@ pub fn build(content: &str, res: &Resources) -> Result<Vec<Node>, String> {
     let Some(root) = doc.root else {
         return Err("no root element".into());
     };
-    // `?attr/…` resolves against the theme of the root (or the default when
-    // the layout declares none) — the same chain Android Studio applies.
-    let theme = root.attr("android:theme").map(|t| res.theme_attrs(t)).unwrap_or_default();
+    // Theme precedence, as in the layout editor: the root's own `android:theme`,
+    // then the activity named by `tools:context`, then the manifest's app theme.
+    // `?attr/…` resolves against that chain, with the M3 palette as fallback.
+    let theme_ref = root
+        .attr("android:theme")
+        .map(str::to_owned)
+        .or_else(|| root.attr("tools:context").and_then(|c| res.activity_theme(c)).map(str::to_owned))
+        .or_else(|| res.app_theme().map(str::to_owned));
+    let theme = theme_ref.as_deref().map(|t| res.theme_attrs(t)).unwrap_or_default();
     let ctx = Ctx { res, theme: Rc::new(theme) };
     let mut stack = Vec::new();
     if root.name_local() == "merge" {
@@ -311,121 +391,225 @@ fn id_ref(raw: &str) -> String {
     raw.trim().trim_start_matches("@+id/").trim_start_matches("@id/").to_owned()
 }
 
-/// Maps a concrete widget class to the kind the renderer understands, so
-/// `AppCompatButton`, `MaterialButton`, `MaterialCardView`, `SwitchCompat`…
-/// preview like their base widget instead of an empty box.
+/// Widget class → renderer kind. Covers the platform widgets, their AppCompat
+/// twins and the Material Components classes, so `MaterialButton`,
+/// `TextInputLayout`, `LinearLayoutCompat` or `BottomNavigationView` preview as
+/// the widget they are instead of an empty box. Anything not listed here is
+/// either a Compose node kind (already canonical) or a custom view.
+const KIND_MAP: &[(&str, &str)] = &[
+    // Containers that stack their children.
+    ("FrameLayout", "FrameLayout"),
+    ("AbsoluteLayout", "FrameLayout"),
+    ("CoordinatorLayout", "FrameLayout"),
+    ("DrawerLayout", "FrameLayout"),
+    ("SwipeRefreshLayout", "FrameLayout"),
+    ("CollapsingToolbarLayout", "FrameLayout"),
+    ("FragmentContainerView", "FrameLayout"),
+    ("ComposeView", "FrameLayout"),
+    ("MaterialButtonToggleGroup", "LinearLayout"),
+    // Flow containers.
+    ("LinearLayout", "LinearLayout"),
+    ("LinearLayoutCompat", "LinearLayout"),
+    ("RadioGroup", "LinearLayout"),
+    ("TableLayout", "LinearLayout"),
+    ("TableRow", "LinearLayout"),
+    ("AppBarLayout", "LinearLayout"),
+    ("TabHost", "LinearLayout"),
+    ("TabWidget", "LinearLayout"),
+    ("GridLayout", "GridLayout"),
+    ("RelativeLayout", "RelativeLayout"),
+    ("ConstraintLayout", "ConstraintLayout"),
+    ("ScrollView", "ScrollView"),
+    ("NestedScrollView", "NestedScrollView"),
+    ("HorizontalScrollView", "HorizontalScrollView"),
+    ("CardView", "CardView"),
+    ("MaterialCardView", "CardView"),
+    ("ChipGroup", "ChipGroup"),
+    ("TextInputLayout", "TextInputLayout"),
+    ("TabLayout", "TabLayout"),
+    ("TabItem", "TabItem"),
+    ("ViewPager", "ViewPager"),
+    ("ViewPager2", "ViewPager"),
+    ("RecyclerView", "RecyclerView"),
+    ("ListView", "ListView"),
+    ("ExpandableListView", "ListView"),
+    ("GridView", "GridView"),
+    ("Toolbar", "Toolbar"),
+    ("MaterialToolbar", "Toolbar"),
+    ("BottomAppBar", "BottomAppBar"),
+    ("BottomNavigationView", "BottomNavigationView"),
+    ("NavigationBarView", "BottomNavigationView"),
+    ("NavigationRailView", "NavigationRailView"),
+    ("NavigationView", "NavigationView"),
+    ("SearchView", "SearchView"),
+    ("androidx.appcompat.widget.SearchView", "SearchView"),
+    // Text.
+    ("TextView", "TextView"),
+    ("AppCompatTextView", "TextView"),
+    ("MaterialTextView", "TextView"),
+    ("CheckedTextView", "TextView"),
+    ("TextClock", "TextView"),
+    ("DigitalClock", "TextView"),
+    ("Chronometer", "TextView"),
+    ("EditText", "EditText"),
+    ("AppCompatEditText", "EditText"),
+    ("MaterialEditText", "EditText"),
+    ("TextInputEditText", "EditText"),
+    ("AutoCompleteTextView", "EditText"),
+    ("AppCompatAutoCompleteTextView", "EditText"),
+    ("MaterialAutoCompleteTextView", "EditText"),
+    ("MultiAutoCompleteTextView", "EditText"),
+    // Buttons and inputs.
+    ("Button", "Button"),
+    ("AppCompatButton", "Button"),
+    ("MaterialButton", "Button"),
+    ("ButtonCompat", "Button"),
+    ("ToggleButton", "Button"),
+    ("Space", "Space"),
+    ("ImageView", "ImageView"),
+    ("AppCompatImageView", "ImageView"),
+    ("ShapeableImageView", "ImageView"),
+    ("ImageButton", "ImageButton"),
+    ("AppCompatImageButton", "ImageButton"),
+    ("CheckBox", "CheckBox"),
+    ("AppCompatCheckBox", "CheckBox"),
+    ("MaterialCheckBox", "CheckBox"),
+    ("RadioButton", "RadioButton"),
+    ("AppCompatRadioButton", "RadioButton"),
+    ("MaterialRadioButton", "RadioButton"),
+    ("Switch", "Switch"),
+    ("SwitchCompat", "Switch"),
+    ("SwitchMaterial", "Switch"),
+    ("MaterialSwitch", "Switch"),
+    ("SeekBar", "SeekBar"),
+    ("AppCompatSeekBar", "SeekBar"),
+    ("MaterialSeekBar", "SeekBar"),
+    ("RatingBar", "RatingBar"),
+    ("AppCompatRatingBar", "RatingBar"),
+    ("ProgressBar", "ProgressBar"),
+    ("LinearProgressIndicator", "ProgressBar"),
+    ("CircularProgressIndicator", "ProgressBar"),
+    ("Spinner", "Spinner"),
+    ("AppCompatSpinner", "Spinner"),
+    ("Chip", "Chip"),
+    ("FloatingActionButton", "FloatingActionButton"),
+    ("ExtendedFloatingActionButton", "FloatingActionButton"),
+    ("MaterialDivider", "Divider"),
+    ("Divider", "Divider"),
+    ("View", "View"),
+    ("SurfaceView", "SurfaceView"),
+    ("TextureView", "SurfaceView"),
+    ("VideoView", "SurfaceView"),
+    ("WebView", "WebView"),
+    ("Guideline", "Guideline"),
+    ("Barrier", "Barrier"),
+    ("Group", "Group"),
+    ("Flow", "Flow"),
+    ("CalendarView", "CalendarView"),
+    ("DatePicker", "DatePicker"),
+    ("TimePicker", "TimePicker"),
+    ("NumberPicker", "NumberPicker"),
+    // Compose node kinds are already canonical.
+    ("Surface", "Surface"),
+    ("Box", "Box"),
+    ("Column", "Column"),
+    ("Row", "Row"),
+    ("LazyColumn", "LazyColumn"),
+    ("LazyRow", "LazyRow"),
+    ("OutlinedButton", "OutlinedButton"),
+    ("TextButton", "TextButton"),
+    ("ElevatedButton", "ElevatedButton"),
+    ("FilledTonalButton", "FilledTonalButton"),
+    ("IconButton", "IconButton"),
+    ("Icon", "Icon"),
+    ("Placeholder", "Placeholder"),
+];
+
+/// Maps a concrete widget class to the kind the renderer understands. A
+/// qualified name whose simple name is unknown falls back to the suffix
+/// heuristic (`com.vinfast.…OneUIButton` previews like a Button).
 fn canonical_kind(tag: &str) -> String {
     let simple = tag.rsplit([':', '.']).next().unwrap_or(tag);
-    let kind = match simple {
-        "AppCompatButton" | "MaterialButton" | "ButtonCompat" => "Button",
-        "AppCompatTextView" | "MaterialTextView" => "TextView",
-        "AppCompatImageView" | "ShapeableImageView" => "ImageView",
-        "AppCompatImageButton" => "ImageButton",
-        "AppCompatCheckBox" | "MaterialCheckBox" => "CheckBox",
-        "AppCompatRadioButton" | "MaterialRadioButton" => "RadioButton",
-        "SwitchCompat" | "SwitchMaterial" | "MaterialSwitch" => "Switch",
-        "AppCompatEditText" | "MaterialEditText" | "TextInputEditText" => "EditText",
-        "AppCompatAutoCompleteTextView" | "MaterialAutoCompleteTextView" | "AutoCompleteTextView" => "EditText",
-        "MaterialCardView" => "CardView",
-        "MaterialToolbar" | "Toolbar" => "Toolbar",
-        "FloatingActionButton" | "ExtendedFloatingActionButton" => "FloatingActionButton",
-        "Chip" => "Chip",
-        "MaterialDivider" => "Divider",
-        "LinearProgressIndicator" => "ProgressBar",
-        "CircularProgressIndicator" => "ProgressBar",
-        "MaterialSeekBar" => "SeekBar",
-        "Space" => "Space",
-        // Every built-in kind stays itself even under a qualified name
-        // (`androidx.constraintlayout.widget.ConstraintLayout`).
-        "LinearLayout"
-        | "ConstraintLayout"
-        | "FrameLayout"
-        | "RelativeLayout"
-        | "GridLayout"
-        | "CoordinatorLayout"
-        | "ScrollView"
-        | "HorizontalScrollView"
-        | "NestedScrollView"
-        | "CardView"
-        | "TabLayout"
-        | "ViewPager"
-        | "ViewPager2"
-        | "RecyclerView"
-        | "ListView"
-        | "GridView"
-        | "TextView"
-        | "EditText"
-        | "ImageView"
-        | "ImageButton"
-        | "Button"
-        | "RadioButton"
-        | "CheckBox"
-        | "Switch"
-        | "SeekBar"
-        | "ProgressBar"
-        | "Spinner"
-        | "WebView"
-        | "Space"
-        | "View"
-        | "Guideline"
-        | "Divider"
-        | "Toolbar"
-        | "FloatingActionButton"
-        | "VideoView"
-        | "Surface"
-        | "Box"
-        | "Column"
-        | "Row"
-        | "LazyColumn"
-        | "LazyRow"
-        | "OutlinedButton"
-        | "TextButton"
-        | "ElevatedButton"
-        | "FilledTonalButton"
-        | "IconButton"
-        | "Icon"
-        | "Chip" => simple,
-        // Anything custom (a dotted class name) maps by suffix:
-        // `com.vinfast.…OneUIButton` previews like a Button, `…ImageView` like
-        // an ImageView. Unqualified tags pass through unchanged.
-        other if tag.contains('.') || tag.contains(':') => return suffix_kind(other),
-        other => other,
-    };
-    kind.to_owned()
+    if let Some((_, kind)) = KIND_MAP.iter().find(|(name, _)| *name == simple) {
+        return (*kind).to_owned();
+    }
+    if tag.contains('.') || tag.contains(':') {
+        return suffix_kind(simple);
+    }
+    simple.to_owned()
 }
 
-/// Custom view classes (`com.foo.BarButton`) → the closest built-in kind.
+/// Custom view classes (`com.foo.BarButton`) → the closest built-in kind, by
+/// name suffix. The declared superclass wins when the source is in the project
+/// (see [`resolve_superclass_kind`]).
 fn suffix_kind(simple: &str) -> String {
-    // Order matters: `RadioButton`/`ImageButton`/`CheckBox` before `Button`.
-    const RULES: [(&str, &str); 21] = [
+    // Order matters: the most specific suffix first.
+    const RULES: &[(&str, &str)] = &[
+        ("TextInputLayout", "TextInputLayout"),
+        ("TextInputEditText", "EditText"),
+        ("AutoCompleteTextView", "EditText"),
+        ("BottomNavigationView", "BottomNavigationView"),
+        ("NavigationRailView", "NavigationRailView"),
+        ("NavigationView", "NavigationView"),
+        ("FloatingActionButton", "FloatingActionButton"),
+        ("RecyclerView", "RecyclerView"),
         ("ImageButton", "ImageButton"),
         ("RadioButton", "RadioButton"),
+        ("ToggleButton", "Button"),
         ("CheckBox", "CheckBox"),
-        ("Button", "Button"),
-        ("EditText", "EditText"),
-        ("AutoCompleteTextView", "EditText"),
-        ("TextView", "TextView"),
-        ("ImageView", "ImageView"),
-        ("RecyclerView", "RecyclerView"),
-        ("ListView", "ListView"),
-        ("GridView", "GridView"),
-        ("ScrollView", "ScrollView"),
+        ("RatingBar", "RatingBar"),
         ("SwitchCompat", "Switch"),
-        ("Switch", "Switch"),
         ("SeekBar", "SeekBar"),
         ("ProgressBar", "ProgressBar"),
-        ("Spinner", "Spinner"),
+        ("ScrollView", "ScrollView"),
+        ("GridLayout", "GridLayout"),
+        ("ConstraintLayout", "ConstraintLayout"),
+        ("RelativeLayout", "RelativeLayout"),
+        ("LinearLayout", "LinearLayout"),
+        ("FrameLayout", "FrameLayout"),
+        ("ListView", "ListView"),
+        ("GridView", "GridView"),
         ("CardView", "CardView"),
+        ("ChipGroup", "ChipGroup"),
+        ("TabLayout", "TabLayout"),
         ("Toolbar", "Toolbar"),
-        ("FloatingActionButton", "FloatingActionButton"),
+        ("Spinner", "Spinner"),
+        ("Switch", "Switch"),
+        ("Button", "Button"),
+        ("EditText", "EditText"),
+        ("TextView", "TextView"),
+        ("ImageView", "ImageView"),
+        ("WebView", "WebView"),
         ("Chip", "Chip"),
+        ("Space", "Space"),
     ];
     for (suffix, kind) in RULES {
-        if simple != suffix && simple.ends_with(suffix) {
-            return kind.to_owned();
+        if simple != *suffix && simple.ends_with(suffix) {
+            return (*kind).to_owned();
         }
     }
     "View".to_owned()
+}
+
+/// Walks a custom view's superclass chain through the project sources and
+/// returns the first ancestor that maps to a known widget kind. A view that
+/// ultimately extends `View`/`ViewGroup` returns `None` (it stays a labelled
+/// box, which is what Android Studio shows when it cannot inflate it either).
+fn resolve_superclass_kind(fqn: &str, res: &Resources) -> Option<String> {
+    let mut current = fqn.to_owned();
+    for _ in 0..6 {
+        let parent = res.class_parent(&current)?;
+        let simple = parent.rsplit(['.', '$']).next().unwrap_or(parent.as_str());
+        if matches!(simple, "View" | "ViewGroup" | "Object" | "Any") {
+            return None;
+        }
+        let kind = canonical_kind(&parent);
+        if kind != "View" {
+            return Some(kind);
+        }
+        current = parent;
+    }
+    None
 }
 
 /// Builds one element into zero or more nodes (`include` of a `<merge>` can
@@ -510,18 +694,29 @@ fn build_view(el: &Element, ctx: &Ctx, depth: usize, stack: &mut Vec<String>) ->
         None => ctx,
     };
     let tag = el.name_local();
-    let mut node = Node { kind: canonical_kind(tag), ..Default::default() };
+    // `<view class="com.foo.Bar"/>` is the escaped spelling of a custom tag.
+    let class = if tag.eq_ignore_ascii_case("view") { el.attr("class").map(str::trim).unwrap_or(tag) } else { tag };
+    let mut kind = canonical_kind(class);
+    if kind == "View" && class.contains('.') {
+        // A custom view previews like the widget it extends, which we can only
+        // know by reading its superclass from the project's sources.
+        kind = resolve_superclass_kind(class, ctx.res).unwrap_or(kind);
+    }
+    let mut node = Node { kind, ..Default::default() };
     // A custom class with no matching widget shows its name, like AS does.
-    if node.kind == "View" && tag.contains('.') {
-        node.sub = Some(tag.rsplit('.').next().unwrap_or(tag).to_owned());
+    if node.kind == "View" && class.contains('.') {
+        node.sub = Some(class.rsplit('.').next().unwrap_or(class).to_owned());
     }
     // XML views clip children unless told otherwise.
     node.style.clip_children = Some(true);
     if let Some(id) = el.attr("android:id") {
         node.id = Some(id_ref(id));
     }
-    // `style="@style/X"` provides the base layer; element attributes win.
+    // `style="@style/X"` provides the base layer; element attributes win. The
+    // style can also say which Material variant this is, because a library
+    // style's items are not in the project's `values`.
     if let Some(style_ref) = el.attr("style") {
+        apply_style_variant(&mut node, ctx.res, style_ref);
         for (name, value) in ctx.res.style_attrs(style_ref) {
             if let Some(local) = name.strip_prefix("android:") {
                 apply_android_attr(&mut node, local, &value, ctx);
@@ -531,30 +726,218 @@ fn build_view(el: &Element, ctx: &Ctx, depth: usize, stack: &mut Vec<String>) ->
     apply_common(el, &mut node, ctx);
     apply_kind_attrs(el, &mut node, ctx);
     apply_tools(el, &mut node, ctx);
-    // `tools:listitem`/`tools:itemCount`: preview a RecyclerView/ListView/
-    // GridView with sample rows of the item layout, like Android Studio.
-    if node.children.is_empty() && matches!(node.kind.as_str(), "RecyclerView" | "ListView" | "GridView") {
-        if let Some(item_layout) = el.attr("tools:listitem") {
-            let name = item_layout.trim().trim_start_matches("@layout/");
-            if let Some(item_root) = ctx.res.layout_xml(name).and_then(|t| xml::parse(&t).ok().and_then(|d| d.root)) {
-                let count = node.style.item_count.unwrap_or(5).clamp(1, 12);
-                for _ in 0..count {
-                    node.children.extend(build_element(&item_root, ctx, depth + 1, stack));
-                }
-            }
-        }
-    }
-    // Defaults Android applies itself.
-    match node.kind.as_str() {
-        "LinearLayout" if node.style.flex_dir.is_none() => node.style.flex_dir = Some(FlexDir::Row),
-        "ScrollView" | "NestedScrollView" => node.style.scroll_y = true,
-        "HorizontalScrollView" => node.style.scroll_x = true,
-        _ => {}
-    }
     for child in el.elements() {
         node.children.extend(build_element(child, ctx, depth + 1, stack));
     }
+    inflate_design_time(el, &mut node, depth, stack, ctx);
+    finalize(&mut node, el);
     node
+}
+
+/// Runs the steps that need the built children: `tools:listitem` samples and
+/// `tools:layout` expansion of `<fragment>` / `<ViewStub>`.
+fn inflate_design_time(el: &Element, node: &mut Node, depth: usize, stack: &mut Vec<String>, ctx: &Ctx) {
+    // `tools:listitem`/`tools:itemCount`: preview a RecyclerView/ListView/
+    // GridView with sample rows of the item layout, like Android Studio.
+    if node.children.is_empty() && matches!(node.kind.as_str(), "RecyclerView" | "ListView" | "GridView")
+        && let Some(item_layout) = el.attr("tools:listitem")
+    {
+        let name = item_layout.trim().trim_start_matches("@layout/");
+        if let Some(item_root) = ctx.res.layout_xml(name).and_then(|t| xml::parse(&t).ok().and_then(|d| d.root)) {
+            let count = node.style.item_count.unwrap_or(5).clamp(1, 12);
+            for _ in 0..count {
+                node.children.extend(build_element(&item_root, ctx, depth + 1, stack));
+            }
+        }
+    }
+    // A `<fragment>`/`<ViewStub>` previews its `tools:layout`, which is exactly
+    // what the attribute is for.
+    if matches!(node.kind.as_str(), "Placeholder" | "ViewStub" | "View")
+        && let Some(layout) = el.attr("tools:layout")
+    {
+        let name = layout.trim().trim_start_matches("@layout/");
+        if let Some(root) = ctx.res.layout_xml(name).and_then(|t| xml::parse(&t).ok().and_then(|d| d.root)) {
+            let mut inflated = build_element(&root, ctx, depth + 1, stack);
+            if inflated.len() == 1 {
+                let mut child = inflated.remove(0);
+                // The host keeps its own id/size unless the tag overrides them.
+                child.id = node.id.clone().or(child.id);
+                child.style.width = node.style.width.or(child.style.width);
+                child.style.height = node.style.height.or(child.style.height);
+                child.style.margin = node.style.margin;
+                *node = child;
+            } else if !inflated.is_empty() {
+                node.children = inflated;
+            }
+        }
+    }
+}
+
+/// Attribute-order-independent fixups plus the defaults Android applies itself.
+fn finalize(node: &mut Node, el: &Element) {
+    let kind = node.kind.clone();
+    let tag = el.tag_local().to_owned();
+    {
+        let s = &mut node.style;
+        // Line spacing multiplies the final font size, which a later attribute
+        // (or a style) may still have changed.
+        let font = s.font_size.unwrap_or(14.0);
+        let mult = s.line_spacing_mult.unwrap_or(1.0);
+        if let Some(extra) = s.line_spacing_extra {
+            s.line_height = Some(font * 1.2 * mult + extra);
+        } else if s.line_spacing_mult.is_some() {
+            s.line_height = Some(font * 1.2 * mult);
+        }
+        if s.single_line {
+            s.max_lines = s.max_lines.or(Some(1));
+            s.ellipsize = true;
+        }
+        if s.enabled == Some(false) && s.alpha.is_none() {
+            s.alpha = Some(0.38);
+        }
+        match kind.as_str() {
+            "LinearLayout" | "ChipGroup" | "TabLayout" | "BottomNavigationView" | "BottomAppBar" => {
+                if s.flex_dir.is_none() {
+                    // RadioGroup/TableLayout stack vertically by default; a
+                    // LinearLayout is horizontal unless it says otherwise.
+                    s.flex_dir = Some(match tag.as_str() {
+                        "RadioGroup" | "TableLayout" | "AppBarLayout" => FlexDir::Column,
+                        _ => FlexDir::Row,
+                    });
+                }
+            }
+            "NavigationView" | "NavigationRailView" => {
+                if s.flex_dir.is_none() {
+                    s.flex_dir = Some(FlexDir::Column);
+                }
+            }
+            "ScrollView" | "NestedScrollView" | "RecyclerView" | "ListView" | "GridView" => s.scroll_y = true,
+            "HorizontalScrollView" | "LazyRow" => s.scroll_x = true,
+            _ => {}
+        }
+        // `app:layoutManager` decides how a RecyclerView lays out its items.
+        if kind == "RecyclerView" {
+            let manager = el.attr("app:layoutManager").or_else(|| el.attr("layoutManager")).unwrap_or("");
+            if manager.contains("Grid") || manager.contains("StaggeredGrid") || s.grid_cols.unwrap_or(0) > 1 {
+                node.kind = "GridView".into();
+                s.grid_cols = Some(s.grid_cols.unwrap_or(2));
+                s.scroll_x = false;
+            } else if manager.contains("Linear") && el.attr("android:orientation").map(str::trim) == Some("horizontal") {
+                node.kind = "LazyRow".into();
+                s.scroll_y = false;
+                s.scroll_x = true;
+            }
+        }
+    }
+}
+
+/// A `style=` reference can change what the widget is: Material styles name the
+/// variant (`Widget.Material3.Button.OutlinedButton`, `…CardView.Elevated`)
+/// while their items live in the AAR, so the name is the only signal available.
+fn apply_style_variant(node: &mut Node, res: &Resources, style_ref: &str) {
+    let names = res.style_chain_names(style_ref);
+    let any = |needle: &str| names.iter().any(|n| n.ends_with(needle));
+    match node.kind.as_str() {
+        "Button" => {
+            if any(".IconButton") {
+                node.kind = "IconButton".into();
+            } else if any(".OutlinedButton") {
+                node.kind = "OutlinedButton".into();
+            } else if any(".TextButton") || any("Widget.AppCompat.Button.Borderless") {
+                node.kind = "TextButton".into();
+            } else if any(".TonalButton") {
+                node.kind = "FilledTonalButton".into();
+            } else if any(".ElevatedButton") {
+                node.kind = "ElevatedButton".into();
+            }
+        }
+        "CardView" => {
+            if any(".CardView.Outlined") {
+                node.style.outlined = true;
+            } else if any(".CardView.Elevated") {
+                node.style.elevation = node.style.elevation.or(Some(3.0));
+            } else if any(".CardView.Filled") {
+                node.style.bg_color =
+                    node.style.bg_color.clone().or_else(|| Some(crate::resources::M3_SURFACE_VARIANT.to_owned()));
+            }
+        }
+        _ => {}
+    }
+    if any(".TextInputLayout.OutlinedBox") || any(".OutlinedBox.Dense") {
+        node.style.outlined = true;
+    }
+}
+
+/// `android:textAppearance` / a `TextAppearance.*` style → the text properties.
+/// Library appearances contribute their name only, so the M3/AppCompat type
+/// scale is recognised by name as well as by items.
+fn apply_text_appearance(node: &mut Node, res: &Resources, raw: &str, ctx: &Ctx) {
+    for name in res.style_chain_names(raw) {
+        // Material 3 styles are named `…Material3.TitleLarge`; the M2 table is
+        // keyed by its own capitalisation, so normalise the M3 names.
+        let normalized = if name.contains("Material3") || name.contains(".M3.") {
+            let last = name.rsplit('.').next().unwrap_or(&name);
+            let mut chars = last.chars();
+            match chars.next() {
+                Some(first) => format!("{}{}", first.to_lowercase(), chars.as_str()),
+                None => last.to_owned(),
+            }
+        } else {
+            name.clone()
+        };
+        if let Some((size, medium)) = text_appearance_scale(&normalized) {
+            node.style.font_size = node.style.font_size.or(Some(size));
+            if medium {
+                node.style.bold = node.style.bold.or(Some(true));
+            }
+        }
+    }
+    for (name, value) in res.style_attrs(raw) {
+        // Nested appearances are already flattened by the chain walk above.
+        if let Some(local) = name.strip_prefix("android:")
+            && local != "textAppearance"
+        {
+            apply_android_attr(node, local, &value, ctx);
+        }
+    }
+}
+
+/// `(size sp, medium weight)` for the well-known text appearance names.
+fn text_appearance_scale(name: &str) -> Option<(f32, bool)> {
+    let last = name.rsplit('.').next().unwrap_or(name);
+    Some(match last {
+        // Material 3 type scale.
+        "displayLarge" => (57.0, false),
+        "displayMedium" => (45.0, false),
+        "displaySmall" => (36.0, false),
+        "headlineLarge" => (32.0, false),
+        "headlineMedium" => (28.0, false),
+        "headlineSmall" => (24.0, false),
+        "titleLarge" => (22.0, false),
+        "titleMedium" => (16.0, true),
+        "titleSmall" => (14.0, true),
+        "bodyLarge" => (16.0, false),
+        "bodyMedium" => (14.0, false),
+        "bodySmall" => (12.0, false),
+        "labelLarge" => (14.0, true),
+        "labelMedium" => (12.0, true),
+        "labelSmall" => (11.0, true),
+        // Material 2 / AppCompat.
+        "headline1" | "Display4" => (96.0, false),
+        "headline2" | "Display3" => (60.0, false),
+        "headline3" | "Display2" => (48.0, false),
+        "headline4" | "Display1" => (34.0, false),
+        "headline5" | "Title" | "LargeTitle" => (24.0, false),
+        "headline6" | "TitleSmall" => (20.0, true),
+        "subtitle1" => (16.0, false),
+        "subtitle2" => (14.0, true),
+        "body1" | "Large" | "Medium" | "Widget" => (16.0, false),
+        "body2" | "Small" => (14.0, false),
+        "caption" | "Caption" => (12.0, false),
+        "overline" | "Overline" => (10.0, true),
+        "button" | "Button" => (14.0, true),
+        _ => return None,
+    })
 }
 
 /// Applies the generic android:* attributes every view shares; unknown ones
@@ -587,6 +970,16 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, ctx: &Ctx) {
             let m = d(value, ctx);
             s.margin = Edges { start: m, end: m, top: m, bottom: m };
         }
+        "layout_marginHorizontal" => {
+            let m = d(value, ctx);
+            s.margin.start = m;
+            s.margin.end = m;
+        }
+        "layout_marginVertical" => {
+            let m = d(value, ctx);
+            s.margin.top = m;
+            s.margin.bottom = m;
+        }
         "layout_marginLeft" | "layout_marginStart" => s.margin.start = d(value, ctx),
         "layout_marginRight" | "layout_marginEnd" => s.margin.end = d(value, ctx),
         "layout_marginTop" => s.margin.top = d(value, ctx),
@@ -595,11 +988,42 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, ctx: &Ctx) {
             let p = d(value, ctx);
             s.padding = Edges { start: p, end: p, top: p, bottom: p };
         }
+        "paddingHorizontal" => {
+            let p = d(value, ctx);
+            s.padding.start = p;
+            s.padding.end = p;
+        }
+        "paddingVertical" => {
+            let p = d(value, ctx);
+            s.padding.top = p;
+            s.padding.bottom = p;
+        }
         "paddingLeft" | "paddingStart" => s.padding.start = d(value, ctx),
         "paddingRight" | "paddingEnd" => s.padding.end = d(value, ctx),
         "paddingTop" => s.padding.top = d(value, ctx),
         "paddingBottom" => s.padding.bottom = d(value, ctx),
         "background" => apply_background(node, value, ctx),
+        "backgroundTint" => {
+            // A tint repaints the background; for a plain colour that is the
+            // colour itself, which is what Material buttons rely on.
+            if let Some(c) = ctx.color(value) {
+                s.bg_color = Some(c);
+            }
+        }
+        "foreground" => {
+            if let Some(c) = ctx.color(value) {
+                s.foreground = Some(c);
+            }
+        }
+        "minWidth" => s.min_width = ctx.dimen(value),
+        "minHeight" => s.min_height = ctx.dimen(value),
+        "maxWidth" => s.max_width = ctx.dimen(value),
+        "maxHeight" => s.max_height = ctx.dimen(value),
+        "enabled" => s.enabled = ctx.res.boolean(value),
+        "translationX" => s.translation = Some((d(value, ctx), s.translation.map(|t| t.1).unwrap_or(0.0))),
+        "translationY" => s.translation = Some((s.translation.map(|t| t.0).unwrap_or(0.0), d(value, ctx))),
+        "scaleX" => s.scale = Some((value.trim().parse().unwrap_or(1.0), s.scale.map(|t| t.1).unwrap_or(1.0))),
+        "scaleY" => s.scale = Some((s.scale.map(|t| t.0).unwrap_or(1.0), value.trim().parse().unwrap_or(1.0))),
         "alpha" => s.alpha = value.trim().parse().ok(),
         "elevation" => s.elevation = Some(d(value, ctx)),
         "rotation" => s.rotation = value.trim().parse().ok(),
@@ -617,12 +1041,19 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, ctx: &Ctx) {
         }
         "text" => node.text = resolve_text(value, ctx),
         "hint" => node.hint = resolve_text(value, ctx),
-        "textSize" => s.font_size = ctx.res.dimen(value, 0),
+        "textAppearance" => apply_text_appearance(node, ctx.res, value, ctx),
+        "textSize" => s.font_size = ctx.dimen(value),
         "textColor" => s.fg = ctx.color(value),
+        "textColorHint" => {
+            if node.hint.is_some() && s.fg.is_none() {
+                s.fg = ctx.color(value);
+            }
+        }
         "textStyle" => {
             s.bold = Some(value.contains("bold"));
             s.italic = Some(value.contains("italic"));
         }
+        "textFontWeight" => s.font_weight = value.trim().parse().ok(),
         "typeface" => {
             s.font_family = Some(match value.trim() {
                 "monospace" => "monospace",
@@ -630,16 +1061,69 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, ctx: &Ctx) {
                 _ => "sans-serif",
             })
         }
+        "fontFamily" => {
+            let (family, weight) = match value.trim() {
+                "monospace" => ("monospace", None),
+                "serif" => ("serif", None),
+                "casual" | "cursive" => ("cursive", None),
+                // `@font/…` names a font file the preview cannot embed.
+                "sans-serif-medium" => ("sans-serif", Some(500)),
+                "sans-serif-black" | "sans-serif-heavy" => ("sans-serif", Some(900)),
+                "sans-serif-light" | "sans-serif-thin" => ("sans-serif", Some(300)),
+                f if f.starts_with("sans-serif-condensed") => ("sans-serif", Some(400)),
+                _ => ("sans-serif", None),
+            };
+            s.font_family = Some(family);
+            if let Some(w) = weight {
+                s.font_weight = Some(w);
+            }
+        }
         "textAllCaps" => s.all_caps = ctx.res.boolean(value).unwrap_or(false),
         "maxLines" => s.max_lines = value.trim().parse().ok(),
+        "lines" => s.max_lines = value.trim().parse().ok(),
+        "singleLine" => s.single_line = ctx.res.boolean(value).unwrap_or(false),
         "ellipsize" => s.ellipsize = matches!(value.trim(), "end" | "marquee" | "middle" | "start"),
         "letterSpacing" => s.letter_spacing = value.trim().parse().ok(),
-        "lineSpacingExtra" => s.line_height = Some(s.font_size.unwrap_or(14.0) * 1.4 + d(value, ctx)),
-        "lineSpacingMultiplier" => {
-            s.line_height = Some(s.font_size.unwrap_or(14.0) * 1.4 * value.trim().parse().unwrap_or(1.0))
+        "lineHeight" => s.line_height = ctx.dimen(value),
+        "lineSpacingExtra" => s.line_spacing_extra = ctx.dimen(value),
+        "lineSpacingMultiplier" => s.line_spacing_mult = value.trim().parse().ok(),
+        "textAlignment" => {
+            let g = s.gravity.unwrap_or_default();
+            s.gravity = Some(Gravity {
+                h: match value.trim() {
+                    "center" => HAlign::Center,
+                    "textEnd" | "viewEnd" | "gravity" => HAlign::End,
+                    _ => HAlign::Start,
+                },
+                v: g.v,
+            });
         }
+        "drawableStart" | "drawableLeft" => {
+            if let Some(img) = drawable_image(value, ctx) {
+                s.drawable_start = Some(img);
+            }
+        }
+        "drawableEnd" | "drawableRight" => {
+            if let Some(img) = drawable_image(value, ctx) {
+                s.drawable_end = Some(img);
+            }
+        }
+        "drawablePadding" => s.drawable_padding = ctx.dimen(value),
         "src" => apply_src(node, value, ctx),
         "tint" => s.tint = ctx.color(value),
+        "buttonTint" => s.tint = ctx.color(value),
+        "thumbTint" => s.thumb_tint = ctx.color(value),
+        "trackTint" => s.track_tint = ctx.color(value),
+        "progressTint" | "indeterminateTint" => s.progress_tint = ctx.color(value),
+        "progressBackgroundTint" => s.track_tint = ctx.color(value),
+        "numStars" => {
+            let max = value.trim().parse().unwrap_or(5.0);
+            s.rating = Some((s.rating.map(|r| r.0).unwrap_or(0.0), max));
+        }
+        "rating" => {
+            let max = s.rating.map(|r| r.1).unwrap_or(5.0);
+            s.rating = Some((value.trim().parse().unwrap_or(0.0), max));
+        }
         "scaleType" => {
             s.scale_type = Some(match value.trim() {
                 "fitXY" => "fill",
@@ -689,12 +1173,53 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, ctx: &Ctx) {
         "layout_constraintVertical_bias" => s.con.v_bias = value.trim().parse().ok(),
         "layout_constraintWidth_percent" => s.con.width_percent = value.trim().parse().ok(),
         "layout_constraintHeight_percent" => s.con.height_percent = value.trim().parse().ok(),
-        "layout_dimensionRatio" => s.con.ratio = parse_ratio(value),
+        "layout_constraintWidth_min" => s.con.width_min = ctx.dimen(value),
+        "layout_constraintWidth_max" => s.con.width_max = ctx.dimen(value),
+        "layout_constraintHeight_min" => s.con.height_min = ctx.dimen(value),
+        "layout_constraintHeight_max" => s.con.height_max = ctx.dimen(value),
+        "layout_constraintWidth_default" | "layout_constraintHeight_default" => {}
+        "layout_constraintHorizontal_weight" | "layout_constraintVertical_weight"
+        | "layout_constraintHorizontal_chainStyle" | "layout_constraintVertical_chainStyle" => {}
+        "layout_dimensionRatio" => {
+            let (ratio, side) = parse_ratio(value);
+            s.con.ratio = ratio;
+            s.con.ratio_side = side;
+        }
+        "layout_constraintCircle" => {
+            let (_, r, a) = s.con.circle.take().unwrap_or_else(|| (String::new(), 0.0, 0.0));
+            s.con.circle = Some((id_ref(value), r, a));
+        }
+        "layout_constraintCircleRadius" => {
+            let (id, _, a) = s.con.circle.clone().unwrap_or_else(|| (String::new(), 0.0, 0.0));
+            s.con.circle = Some((id, d(value, ctx), a));
+        }
+        "layout_constraintCircleAngle" => {
+            let (id, r, _) = s.con.circle.clone().unwrap_or_else(|| (String::new(), 0.0, 0.0));
+            s.con.circle = Some((id, r, value.trim().parse().unwrap_or(0.0)));
+        }
+        "layout_goneMarginStart" | "layout_goneMarginLeft" => s.con.gone_start = Some(d(value, ctx)),
+        "layout_goneMarginEnd" | "layout_goneMarginRight" => s.con.gone_end = Some(d(value, ctx)),
+        "layout_goneMarginTop" => s.con.gone_top = Some(d(value, ctx)),
+        "layout_goneMarginBottom" => s.con.gone_bottom = Some(d(value, ctx)),
         "layout_constraintGuide_begin" => s.con.guide_begin = Some(d(value, ctx)),
         "layout_constraintGuide_end" => s.con.guide_end = Some(d(value, ctx)),
         "layout_constraintGuide_percent" => s.con.guide_percent = value.trim().parse().ok(),
         "layout_editor_absoluteX" => s.con.editor_x = Some(d(value, ctx)),
         "layout_editor_absoluteY" => s.con.editor_y = Some(d(value, ctx)),
+        // ConstraintLayout helpers (Barrier / Group / Flow).
+        "barrierDirection" => {
+            s.con.barrier_direction = match value.trim() {
+                "start" | "left" => Some(BarrierDir::Start),
+                "end" | "right" => Some(BarrierDir::End),
+                "top" => Some(BarrierDir::Top),
+                "bottom" => Some(BarrierDir::Bottom),
+                _ => None,
+            }
+        }
+        "barrierAllowsGoneWidgets" => {}
+        "constraint_referenced_ids" => {
+            s.con.referenced_ids = value.split(',').map(|v| id_ref(v.trim())).filter(|v| !v.is_empty()).collect();
+        }
         // GridLayout
         "columnCount" => s.grid_cols = value.trim().parse().ok(),
         "rowCount" => {}
@@ -707,29 +1232,154 @@ fn apply_android_attr(node: &mut Node, name: &str, value: &str, ctx: &Ctx) {
 }
 
 fn apply_app_attr(node: &mut Node, name: &str, value: &str, ctx: &Ctx) {
-    // ConstraintLayout rules live in the `app:` namespace.
-    if name.starts_with("layout_constraint") || name == "layout_dimensionRatio" || name.starts_with("layout_editor_") {
+    // ConstraintLayout rules and helpers live in the `app:` namespace.
+    if name.starts_with("layout_constraint")
+        || name.starts_with("layout_editor_")
+        || name.starts_with("layout_gone")
+        || name == "layout_dimensionRatio"
+        || matches!(name, "barrierDirection" | "barrierAllowsGoneWidgets" | "constraint_referenced_ids")
+    {
         return apply_android_attr(node, name, value, ctx);
     }
     let s = &mut node.style;
     match name {
-        "cardCornerRadius" => s.radius = Some(d(value, ctx)),
-        "cardElevation" => s.elevation = Some(d(value, ctx)),
-        "cardBackgroundColor" => s.bg_color = ctx.color(value),
-        "icon" => {
-            let _ = apply_image_attr(node, value, ctx, |n, i| n.style.icon = Some(i));
+        // CardView / MaterialCardView / any outlined box.
+        "cardCornerRadius" | "cornerRadius" => s.radius = Some(d(value, ctx)),
+        "cardElevation" | "elevation" => s.elevation = Some(d(value, ctx)),
+        "cardBackgroundColor" | "cardForegroundColor" => s.bg_color = ctx.color(value),
+        "cardStrokeColor" | "strokeColor" => {
+            if let Some(c) = ctx.color(value) {
+                set_border_color(s, c);
+            }
         }
-        "iconTint" => s.tint = ctx.color(value),
+        "cardStrokeWidth" | "strokeWidth" | "borderWidth" => set_border_width(s, d(value, ctx)),
+        // Images and icons.
+        "srcCompat" | "src" => apply_src(node, value, ctx),
+        "tint" => s.tint = ctx.color(value),
+        "backgroundTint" => {
+            if let Some(c) = ctx.color(value) {
+                s.bg_color = Some(c);
+            }
+        }
+        "icon" => {
+            apply_image_attr(node, value, ctx, |n, i| n.style.icon = Some(i));
+        }
+        "iconTint" | "iconTintList" => s.tint = ctx.color(value),
+        "iconPadding" => s.drawable_padding = Some(d(value, ctx)),
+        "navigationIcon" => {
+            if let Some(img) = drawable_image(value, ctx) {
+                s.drawable_start = Some(img);
+            }
+        }
+        // Material content padding (buttons, cards, chips).
         "contentPadding" => {
             let p = d(value, ctx);
             s.padding = Edges { start: p, end: p, top: p, bottom: p };
         }
-        "contentPaddingLeft" => s.padding.start = d(value, ctx),
-        "contentPaddingRight" => s.padding.end = d(value, ctx),
+        "contentPaddingLeft" | "contentPaddingStart" => s.padding.start = d(value, ctx),
+        "contentPaddingRight" | "contentPaddingEnd" => s.padding.end = d(value, ctx),
         "contentPaddingTop" => s.padding.top = d(value, ctx),
         "contentPaddingBottom" => s.padding.bottom = d(value, ctx),
+        // Toolbar / ActionBar.
+        "title" => node.text = resolve_text(value, ctx),
+        "subtitle" => node.hint = resolve_text(value, ctx),
+        "titleTextColor" => s.fg = ctx.color(value),
+        "menu" => node.items = menu_items(value, ctx),
+        // TextInputLayout.
+        "boxBackgroundMode" => s.outlined = value.trim() == "outline",
+        "boxBackgroundColor" => s.bg_color = ctx.color(value),
+        "boxStrokeColor" => {
+            if let Some(c) = ctx.color(value) {
+                set_border_color(s, c);
+            }
+        }
+        "boxStrokeWidth" | "boxStrokeWidthFocused" => set_border_width(s, d(value, ctx)),
+        "hintTextColor" | "errorTextColor" | "counterTextColor" | "placeholderTextColor" => {}
+        "startIconDrawable" => {
+            if let Some(img) = drawable_image(value, ctx) {
+                s.drawable_start = Some(img);
+            }
+        }
+        "endIconDrawable" => {
+            if let Some(img) = drawable_image(value, ctx) {
+                s.drawable_end = Some(img);
+            }
+        }
+        // Chip.
+        "chipBackgroundColor" => s.bg_color = ctx.color(value),
+        "chipStrokeColor" => {
+            if let Some(c) = ctx.color(value) {
+                set_border_color(s, c);
+            }
+        }
+        "chipStrokeWidth" => set_border_width(s, d(value, ctx)),
+        "chipCornerRadius" => s.radius = Some(d(value, ctx)),
+        "chipMinHeight" => s.min_height = Some(d(value, ctx)),
+        "chipIcon" | "checkedIcon" | "closeIcon" => {
+            if let Some(img) = drawable_image(value, ctx) {
+                s.icon = Some(img);
+            }
+        }
+        "chipIconTint" => s.tint = ctx.color(value),
+        // Tabs.
+        "tabIndicatorColor" => s.progress_tint = ctx.color(value),
+        "tabIndicatorHeight" => {}
+        "tabTextColor" | "tabSelectedTextColor" | "tabMode" | "tabGravity" => {}
+        "tabText" => node.items.push(MenuItem { label: resolve_text(value, ctx).unwrap_or_default(), ..Default::default() }),
+        // Navigation bars / menus.
+        "itemIconTint" => s.tint = ctx.color(value),
+        "itemTextColor" => s.fg = ctx.color(value),
+        "itemBackground" => s.bg_color = ctx.color(value),
+        // Progress indicators.
+        "indicatorColor" => s.progress_tint = ctx.color(value),
+        "trackColor" => s.track_tint = ctx.color(value),
+        "trackThickness" | "indicatorSize" | "trackCornerRadius" | "trackStopIndicatorSize" => {}
+        // FAB / ripple.
+        "fabSize" | "rippleColor" | "shapeAppearance" | "shapeAppearanceOverlay" | "liftOnScroll"
+        | "labelVisibilityMode" | "itemRippleColor" | "showAnimationBehavior" => {}
         _ => {} // other app:* namespaces ignored
     }
+}
+
+fn set_border_color(s: &mut Style, color: String) {
+    let w = s.border.as_ref().map(|b| b.0).unwrap_or(1.0);
+    s.border = Some((w, color));
+}
+
+fn set_border_width(s: &mut Style, w: f32) {
+    let color = s
+        .border
+        .clone()
+        .map(|b| b.1)
+        .unwrap_or_else(|| crate::resources::M3_OUTLINE_VARIANT.to_owned());
+    s.border = Some((w, color));
+}
+
+/// A drawable reference as something the renderer can paint inline.
+fn drawable_image(value: &str, ctx: &Ctx) -> Option<Image> {
+    let name = value.trim().strip_prefix("@drawable/").or_else(|| value.trim().strip_prefix("@mipmap/"))?;
+    match ctx.res.drawable(name) {
+        Some(ResDrawable::Svg(svg)) => Some(Image::Svg(svg)),
+        Some(ResDrawable::Image(uri)) => Some(Image::Uri(uri)),
+        _ => None,
+    }
+}
+
+/// `app:menu="@menu/main"` → the menu's items, titles resolved.
+fn menu_items(value: &str, ctx: &Ctx) -> Vec<MenuItem> {
+    ctx.res
+        .menu_items(value)
+        .into_iter()
+        .map(|item| MenuItem {
+            label: item.title,
+            icon: match item.icon {
+                Some(ResDrawable::Svg(svg)) => Some(Image::Svg(svg)),
+                Some(ResDrawable::Image(uri)) => Some(Image::Uri(uri)),
+                _ => None,
+            },
+            checked: false,
+        })
+        .collect()
 }
 
 /// `tools:` attributes win over the runtime ones, exactly like Android Studio.
@@ -745,13 +1395,14 @@ fn apply_tool(node: &mut Node, local: &str, value: &str, ctx: &Ctx) {
     match local {
         "text" => node.text = resolve_text(value, ctx),
         "hint" => node.hint = resolve_text(value, ctx),
-        "src" => apply_src(node, value, ctx),
+        "src" | "srcCompat" => apply_src(node, value, ctx),
         "background" => apply_background(node, value, ctx),
         "textColor" => node.style.fg = ctx.color(value),
+        "textSize" => node.style.font_size = ctx.dimen(value),
         "visibility" => node.style.visibility = parse_visibility(value),
         "itemCount" => node.style.item_count = value.trim().parse().ok(),
-        "listitem" => {} // consumed by build_view when inflating sample rows
-        _ => {}          // tools:ignore, tools:context, tools:targetApi, …
+        "listitem" | "layout" => {} // consumed while inflating samples / design-time layouts
+        _ => {}                     // tools:ignore, tools:context, tools:targetApi, …
     }
 }
 
@@ -762,11 +1413,26 @@ fn parse_anchor(value: &str) -> Anchor {
     }
 }
 
-fn parse_ratio(value: &str) -> Option<(f32, f32)> {
+/// `layout_dimensionRatio`: `"16:9"`, `"H,16:9"` (the height is derived from
+/// the width) or `"W,16:9"` (the width is). Returns the ratio plus which side
+/// it derives, `None` for the side when the prefix is absent.
+fn parse_ratio(value: &str) -> (Option<(f32, f32)>, Option<bool>) {
     let v = value.trim();
-    let v = v.split(',').next_back().unwrap_or(v); // "H,16:9" form
-    let (w, h) = v.split_once(':')?;
-    Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+    let (prefix, rest) = match v.split_once(',') {
+        Some((p, r)) => (Some(p.trim().to_uppercase()), r.trim()),
+        None => (None, v),
+    };
+    let side = match prefix.as_deref() {
+        Some("W") => Some(true),
+        Some("H") => Some(false),
+        _ => None,
+    };
+    let Some((w, h)) = rest.split_once(':') else { return (None, side) };
+    let ratio = match (w.trim().parse::<f32>().ok(), h.trim().parse::<f32>().ok()) {
+        (Some(w), Some(h)) if w > 0.0 && h > 0.0 => Some((w, h)),
+        _ => None,
+    };
+    (ratio, side)
 }
 
 fn resolve_text(value: &str, ctx: &Ctx) -> Option<String> {
@@ -785,12 +1451,14 @@ fn parse_size(value: &str, ctx: &Ctx) -> Option<Size> {
     match value.trim() {
         "match_parent" | "fill_parent" => Some(Size::Match),
         "wrap_content" => Some(Size::Wrap),
-        _ => ctx.res.dimen(value, 0).map(Size::Px),
+        _ => ctx.dimen(value).map(Size::Px),
     }
 }
 
+/// A dimension in px; theme attributes (`?attr/actionBarSize`) included, `0`
+/// when the value cannot be resolved (Android would use its own default).
 fn d(value: &str, ctx: &Ctx) -> f32 {
-    ctx.res.dimen(value, 0).unwrap_or(0.0)
+    ctx.dimen(value).unwrap_or(0.0)
 }
 
 fn apply_background(node: &mut Node, value: &str, ctx: &Ctx) {
@@ -801,7 +1469,12 @@ fn apply_background(node: &mut Node, value: &str, ctx: &Ctx) {
     }
     if let Some(name) = value.strip_prefix("@drawable/").or_else(|| value.strip_prefix("@mipmap/")) {
         match ctx.res.drawable(name) {
-            Some(ResDrawable::Shape(shape)) => s.shape = Some(shape),
+            Some(ResDrawable::Shape(mut shape)) => {
+                // The drawable was parsed without a theme; `?attr/…` inside it
+                // resolves against the view's theme, like inflation does.
+                shape.resolve_theme(|v| ctx.color(v));
+                s.shape = Some(shape);
+            }
             Some(ResDrawable::Svg(svg)) => s.bg_image = Some(Image::Uri(svg_data_uri(&svg))),
             Some(ResDrawable::Image(uri)) => s.bg_image = Some(Image::Uri(uri)),
             None => s.drawable = Some(name.to_owned()),
@@ -832,7 +1505,8 @@ fn apply_image_attr(node: &mut Node, value: &str, ctx: &Ctx, set: impl Fn(&mut N
         return false;
     };
     match ctx.res.drawable(name) {
-        Some(ResDrawable::Shape(shape)) => {
+        Some(ResDrawable::Shape(mut shape)) => {
+            shape.resolve_theme(|v| ctx.color(v));
             node.style.shape = Some(shape);
             node.sub = None;
         }
@@ -853,6 +1527,7 @@ fn apply_src(node: &mut Node, value: &str, ctx: &Ctx) {
 
 /// Kind-specific handling that plain attribute application can't express.
 fn apply_kind_attrs(el: &Element, node: &mut Node, ctx: &Ctx) {
+    let tag = el.tag_local().to_owned();
     match node.kind.as_str() {
         "ProgressBar" => {
             let explicit_bar = el.attr("android:progress").is_some()
@@ -862,21 +1537,60 @@ fn apply_kind_attrs(el: &Element, node: &mut Node, ctx: &Ctx) {
                 None => !explicit_bar,
             };
             // Material progress indicators say which shape they are.
-            match el.tag_local() {
+            match tag.as_str() {
                 "CircularProgressIndicator" => node.style.spinner = true,
                 "LinearProgressIndicator" => node.style.spinner = false,
                 _ => {}
             }
         }
+        "RatingBar" => {
+            if node.style.rating.is_none() {
+                node.style.rating = Some((0.0, 5.0));
+            }
+        }
         "fragment" => {
+            // `tools:layout` is inflated later; without it there is nothing to
+            // draw, so the tag is labelled like Android Studio labels it.
             node.kind = "Placeholder".into();
             let name = el.attr("android:name").or_else(|| el.attr("class")).unwrap_or("fragment");
             node.sub = Some(name.rsplit(['.', ':']).next().unwrap_or(name).to_owned());
         }
+        "ViewStub" => {
+            // Invisible at runtime; the design view only shows it via tools:layout.
+            if el.attr("tools:layout").is_none() {
+                node.style.visibility = Visibility::Gone;
+            }
+        }
         "Guideline" => {
-            node.style.guideline = Some(el.attr("android:orientation").map(str::trim) != Some("horizontal"));
+            node.style.guideline = Some(!matches!(el.local("orientation").map(str::trim), Some("horizontal")));
+        }
+        // ConstraintLayout helpers position other views; they draw nothing.
+        "Barrier" | "Group" | "Flow" => {
+            if node.kind == "Barrier" {
+                node.style.guideline = Some(!matches!(
+                    node.style.con.barrier_direction,
+                    Some(BarrierDir::Top) | Some(BarrierDir::Bottom)
+                ));
+            } else {
+                node.style.visibility = Visibility::Gone;
+            }
+        }
+        "Toolbar" => {
+            // A toolbar without an explicit title shows the app name, as the
+            // platform does when the activity sets it.
+            if node.text.is_none() {
+                node.text = ctx.res.text("@string/app_name", 0);
+            }
         }
         _ => {}
+    }
+    // Clocks show a plausible time in the preview instead of being blank.
+    if node.kind == "TextView" && node.text.is_none() {
+        match tag.as_str() {
+            "TextClock" | "DigitalClock" => node.text = Some("12:00".to_owned()),
+            "Chronometer" => node.text = Some("00:00".to_owned()),
+            _ => {}
+        }
     }
 }
 
@@ -942,18 +1656,31 @@ fn wrap_estimate(node: &Node, depth: u32) -> (f32, f32) {
         |extra: f32| node.text.as_deref().map(|t| t.chars().count() as f32 * font * 0.62 + extra).unwrap_or(0.0);
     match node.kind.as_str() {
         "TextView" => (text_w(0.0) + pad_h, font * 1.4 + pad_v),
-        "Button" | "OutlinedButton" | "TextButton" | "ElevatedButton" => {
+        "Button" | "OutlinedButton" | "TextButton" | "ElevatedButton" | "FilledTonalButton" => {
             (text_w(32.0) + pad_h, (font * 1.4 + 20.0 + pad_v).max(36.0))
         }
-        "EditText" => ((text_w(16.0) + pad_h).max(96.0), (font * 1.4 + 24.0 + pad_v).max(48.0)),
+        "Chip" => (text_w(24.0) + pad_h, (font * 1.4 + 12.0 + pad_v).max(32.0)),
+        "IconButton" | "FloatingActionButton" => (56.0 + pad_h, 56.0 + pad_v),
+        "EditText" | "TextInputLayout" | "SearchView" => {
+            ((text_w(16.0) + pad_h).max(96.0), (font * 1.4 + 24.0 + pad_v).max(48.0))
+        }
         "CheckBox" | "RadioButton" | "Switch" => ((24.0 + text_w(0.0)).max(32.0), 32.0 + pad_v),
         "ImageView" | "ImageButton" | "Icon" => (48.0 + pad_h, 48.0 + pad_v),
         "ProgressBar" if s.spinner => (32.0, 32.0),
         "ProgressBar" => (120.0, 8.0),
         "SeekBar" => (160.0, 32.0),
-        "Space" | "Guideline" => (0.0, 0.0),
+        "RatingBar" => (s.rating.map(|r| r.1).unwrap_or(5.0) * 24.0, 32.0),
+        "Toolbar" => (text_w(0.0).max(160.0) + pad_h, 56.0 + pad_v),
+        "TabItem" => (text_w(32.0) + pad_h, 48.0 + pad_v),
+        "Space" | "Guideline" | "Barrier" | "Group" | "Flow" => (0.0, 0.0),
         "Divider" => (120.0, 1.0),
         "LinearLayout"
+        | "ChipGroup"
+        | "TabLayout"
+        | "BottomNavigationView"
+        | "BottomAppBar"
+        | "NavigationView"
+        | "NavigationRailView"
         | "ScrollView"
         | "HorizontalScrollView"
         | "NestedScrollView"
@@ -1312,7 +2039,7 @@ fn solve_constraint(node: &mut Node, pw: f32, ph: f32) {
         geom[i] = if vertical {
             Geom { x: x_or_y, y: 0.0, w: 0.0, h: ph }
         } else {
-            Geom { x: 0.0, y: x_or_y, w: pw, h: x_or_y }
+            Geom { x: 0.0, y: x_or_y, w: pw, h: 0.0 }
         };
         pos[i] = if vertical {
             Pos { left: Some(x_or_y), top: Some(0.0), right: None, bottom: Some(0.0) }
@@ -1321,33 +2048,119 @@ fn solve_constraint(node: &mut Node, pw: f32, ph: f32) {
         };
     }
 
-    // Two passes for forward references.
+    // Two passes for forward references; barriers re-solve after each pass
+    // because they anchor to widgets solved in it.
     for _ in 0..2 {
+        solve_barriers(node, &ids, &mut geom, &mut pos, pw, ph);
         for i in 0..n {
             let style = &node.children[i].style;
-            if style.con.is_guideline() && node.children[i].kind == "Guideline" {
+            let kind = node.children[i].kind.clone();
+            if kind == "Guideline" || kind == "Barrier" || kind == "Group" || kind == "Flow" {
                 continue;
             }
-            if style.visibility == Visibility::Gone {
-                continue;
-            }
-            let m = style.margin;
             let con = &style.con;
+            // A `gone` widget collapses to the point its constraints give it,
+            // which is what the views anchored to it measure against.
+            let gone = style.visibility == Visibility::Gone;
+            let (mut ew, mut eh) = if gone { (0.0, 0.0) } else { estimate_size(&node.children[i], pw, ph) };
+
+            // Circular positioning replaces every other constraint.
+            if let Some((id, radius, angle)) = con.circle.clone()
+                && let Some(&t) = ids.get(id.as_str())
+                && !gone
+            {
+                let g = geom[t];
+                let rad = angle.to_radians();
+                let x = g.x + g.w / 2.0 + radius * rad.sin() - ew / 2.0;
+                let y = g.y + g.h / 2.0 - radius * rad.cos() - eh / 2.0;
+                geom[i] = Geom { x, y, w: ew, h: eh };
+                pos[i] = Pos { left: Some(x), top: Some(y), right: None, bottom: None };
+                continue;
+            }
+
+            // Margins of a `gone` anchor are replaced by the gone margins.
+            let gone_anchor = |a: Option<&Anchor>| match a {
+                Some(Anchor::Id(id)) => {
+                    ids.get(id.as_str()).is_some_and(|&t| node.children[t].style.visibility == Visibility::Gone)
+                }
+                _ => false,
+            };
+            let start_gone = gone_anchor(con.start_to_start.as_ref().or(con.start_to_end.as_ref()));
+            let end_gone = gone_anchor(con.end_to_end.as_ref().or(con.end_to_start.as_ref()));
+            let top_gone = gone_anchor(con.top_to_top.as_ref().or(con.top_to_bottom.as_ref()));
+            let bottom_gone = gone_anchor(con.bottom_to_bottom.as_ref().or(con.bottom_to_top.as_ref()));
+            let m = if gone {
+                Edges::default()
+            } else {
+                Edges {
+                    start: if start_gone { con.gone_start.unwrap_or(0.0) } else { style.margin.start },
+                    end: if end_gone { con.gone_end.unwrap_or(0.0) } else { style.margin.end },
+                    top: if top_gone { con.gone_top.unwrap_or(0.0) } else { style.margin.top },
+                    bottom: if bottom_gone { con.gone_bottom.unwrap_or(0.0) } else { style.margin.bottom },
+                }
+            };
 
             // Width: fixed / percent / ratio needs the other axis. `0dp` is
             // match-constraint in ConstraintLayout.
-            let (mut ew, mut eh) = estimate_size(&node.children[i], pw, ph);
             let mut ratio_w = false;
             let mut ratio_h = false;
+            let w_match = matches!(style.width, Some(Size::Match) | Some(Size::Px(0.0)));
+            let h_match = matches!(style.height, Some(Size::Match) | Some(Size::Px(0.0)));
             if let Some(ratio) = con.ratio {
-                let w_match = matches!(style.width, Some(Size::Match) | Some(Size::Px(0.0)));
-                let h_match = matches!(style.height, Some(Size::Match) | Some(Size::Px(0.0)));
-                // "w:h": width = height * (w/h) when only the height is decided.
-                if w_match && !h_match {
-                    ew = eh * ratio.0 / ratio.1;
+                // With both axes matched the ratio is derived from the span the
+                // opposing anchors stretch across, not the placeholder estimate.
+                let stretch_w = if w_match {
+                    let l = con
+                        .start_to_start
+                        .as_ref()
+                        .and_then(|x| anchor_edge(x, false, &ids, &geom, pw, ph, true))
+                        .or_else(|| {
+                            con.start_to_end.as_ref().and_then(|x| anchor_edge(x, true, &ids, &geom, pw, ph, true))
+                        });
+                    let r = con
+                        .end_to_end
+                        .as_ref()
+                        .and_then(|x| anchor_edge(x, true, &ids, &geom, pw, ph, true))
+                        .or_else(|| {
+                            con.end_to_start.as_ref().and_then(|x| anchor_edge(x, false, &ids, &geom, pw, ph, true))
+                        });
+                    match (l, r) {
+                        (Some(l), Some(r)) => Some((r - m.end - (l + m.start)).max(0.0)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                let stretch_h = if h_match {
+                    let t = con
+                        .top_to_top
+                        .as_ref()
+                        .and_then(|x| anchor_edge(x, false, &ids, &geom, pw, ph, false))
+                        .or_else(|| {
+                            con.top_to_bottom.as_ref().and_then(|x| anchor_edge(x, true, &ids, &geom, pw, ph, false))
+                        });
+                    let b = con
+                        .bottom_to_bottom
+                        .as_ref()
+                        .and_then(|x| anchor_edge(x, true, &ids, &geom, pw, ph, false))
+                        .or_else(|| {
+                            con.bottom_to_top.as_ref().and_then(|x| anchor_edge(x, false, &ids, &geom, pw, ph, false))
+                        });
+                    match (t, b) {
+                        (Some(t), Some(b)) => Some((b - m.bottom - (t + m.top)).max(0.0)),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                // `"W,16:9"` derives the width, `"H,16:9"` the height; without a
+                // prefix the undecided side is derived from the decided one.
+                let derive_width = con.ratio_side.unwrap_or(w_match && !h_match);
+                if derive_width {
+                    ew = stretch_h.unwrap_or(eh) * ratio.0 / ratio.1;
                     ratio_w = true;
-                } else if h_match && !w_match {
-                    eh = ew * ratio.1 / ratio.0;
+                } else {
+                    eh = stretch_w.unwrap_or(ew) * ratio.1 / ratio.0;
                     ratio_h = true;
                 }
             }
@@ -1359,13 +2172,23 @@ fn solve_constraint(node: &mut Node, pw: f32, ph: f32) {
                 eh = p * ph;
                 size_over[i].1 = Some(Size::Percent(p * 100.0));
             }
+            let clamped_w = clamp_dim(ew, con.width_min, con.width_max);
+            let clamped_h = clamp_dim(eh, con.height_min, con.height_max);
+            if (clamped_w - ew).abs() > f32::EPSILON && w_match {
+                size_over[i].0 = Some(Size::Px(clamped_w));
+            }
+            if (clamped_h - eh).abs() > f32::EPSILON && h_match {
+                size_over[i].1 = Some(Size::Px(clamped_h));
+            }
+            ew = clamped_w;
+            eh = clamped_h;
             if ratio_w {
                 size_over[i].0 = Some(Size::Px(ew));
             }
             if ratio_h {
                 size_over[i].1 = Some(Size::Px(eh));
             }
-            let match_w = matches!(style.width, Some(Size::Match) | Some(Size::Px(0.0))) && !ratio_w;
+            let match_w = w_match && !ratio_w;
 
             // Horizontal.
             let a = con
@@ -1391,7 +2214,7 @@ fn solve_constraint(node: &mut Node, pw: f32, ph: f32) {
                         .map(|v| v - m.end)
                 });
             let (emit_l, emit_r, x) = match (a, b) {
-                (Some(a), Some(b)) if match_w => (Some(a), Some(pw - b), a),
+                (Some(a), Some(b)) if match_w => (Some(a), Some((pw - b).max(0.0)), a),
                 (Some(a), Some(b)) => {
                     let bias = con.h_bias.unwrap_or(0.5).clamp(0.0, 1.0);
                     let span = (b - a).max(0.0);
@@ -1432,9 +2255,9 @@ fn solve_constraint(node: &mut Node, pw: f32, ph: f32) {
                         .and_then(|x| anchor_edge(x, false, &ids, &geom, pw, ph, false))
                         .map(|v| v - m.bottom)
                 });
-            let match_h = matches!(style.height, Some(Size::Match) | Some(Size::Px(0.0))) && !ratio_h;
+            let match_h = h_match && !ratio_h;
             let (emit_t, emit_b, y) = match (a, b) {
-                (Some(a), Some(b)) if match_h => (Some(a), Some(ph - b), a),
+                (Some(a), Some(b)) if match_h => (Some(a), Some((ph - b).max(0.0)), a),
                 (Some(a), Some(b)) => {
                     let bias = con.v_bias.unwrap_or(0.5).clamp(0.0, 1.0);
                     let span = (b - a).max(0.0);
@@ -1463,6 +2286,41 @@ fn solve_constraint(node: &mut Node, pw: f32, ph: f32) {
         if let Some(h) = h_over {
             child.style.height = Some(h);
         }
+    }
+}
+
+/// `layout_constraintWidth_min`/`max` (`wrap` is 0, so it never clamps).
+fn clamp_dim(v: f32, min: Option<f32>, max: Option<f32>) -> f32 {
+    let v = min.map(|m| v.max(m)).unwrap_or(v);
+    max.filter(|m| *m > 0.0).map(|m| v.min(m)).unwrap_or(v)
+}
+
+/// A `Barrier` is a zero-size anchor on the extreme edge of the views it
+/// references, shifted by its own margin.
+fn solve_barriers(node: &Node, ids: &HashMap<&str, usize>, geom: &mut [Geom], pos: &mut [Pos], pw: f32, ph: f32) {
+    for (i, child) in node.children.iter().enumerate() {
+        if child.kind != "Barrier" {
+            continue;
+        }
+        let Some(dir) = child.style.con.barrier_direction else { continue };
+        let targets: Vec<usize> =
+            child.style.con.referenced_ids.iter().filter_map(|id| ids.get(id.as_str()).copied()).collect();
+        if targets.is_empty() {
+            continue;
+        }
+        let m = child.style.margin;
+        let (vertical, at) = match dir {
+            BarrierDir::Start => (true, targets.iter().map(|&t| geom[t].x).fold(f32::MAX, f32::min) - m.start),
+            BarrierDir::End => (true, targets.iter().map(|&t| geom[t].right()).fold(f32::MIN, f32::max) + m.end),
+            BarrierDir::Top => (false, targets.iter().map(|&t| geom[t].y).fold(f32::MAX, f32::min) - m.top),
+            BarrierDir::Bottom => (false, targets.iter().map(|&t| geom[t].bottom()).fold(f32::MIN, f32::max) + m.bottom),
+        };
+        geom[i] = if vertical { Geom { x: at, y: 0.0, w: 0.0, h: ph } } else { Geom { x: 0.0, y: at, w: pw, h: 0.0 } };
+        pos[i] = if vertical {
+            Pos { left: Some(at), top: Some(0.0), right: None, bottom: Some(0.0) }
+        } else {
+            Pos { left: Some(0.0), top: Some(at), right: Some(0.0), bottom: None }
+        };
     }
 }
 

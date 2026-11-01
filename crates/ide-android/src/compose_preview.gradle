@@ -1,0 +1,47 @@
+// Resolve the source-owning Android variant without changing the project.
+import groovy.json.JsonOutput
+
+def models = []
+def registerAndroid = { p ->
+    def components = p.extensions.findByName('androidComponents')
+    if (components != null) components.onVariants(components.selector().all()) { v -> models << [project: p, variant: v] }
+}
+gradle.beforeProject { p ->
+    p.plugins.withId('com.android.application') { registerAndroid(p) }
+    p.plugins.withId('com.android.library') { registerAndroid(p) }
+}
+gradle.rootProject { root ->
+    root.tasks.register('openideaComposePreviewModel') {
+        doLast {
+            def source = new File(System.getenv('OPENIDEA_COMPOSE_SOURCE')).canonicalFile
+            def matches = []
+            models.each { item ->
+                def p = item.project
+                def v = item.variant
+                def cap = v.name.substring(0, 1).toUpperCase(Locale.ROOT) + v.name.substring(1)
+                def tasks = [p.tasks.findByName("compile${cap}JavaWithJavac"), p.tasks.findByName("compile${cap}Kotlin")].findAll { it != null }
+                def files = [] as Set
+                def classes = [] as Set
+                tasks.each { t ->
+                    def input = t.name.endsWith('Kotlin') ? t.sources : t.source
+                    input.asFileTree.files.findAll { it.isFile() && it.name == source.name }.each { files.add(it.canonicalFile) }
+                    if (t.hasProperty('destinationDirectory')) classes.add(t.destinationDirectory.get().asFile.absolutePath)
+                }
+                if (files.contains(source)) matches << [item: item, files: files, classes: classes]
+            }
+            def modules = matches.collect { it.item.project.path }.unique()
+            def result
+            if (modules.size() != 1) {
+                result = [error: modules.empty ? 'No Android variant contains the source file' : 'Source belongs to multiple Android modules']
+            } else {
+                matches.sort { a, b ->
+                    (a.item.variant.buildType == 'debug' ? 0 : 1) <=> (b.item.variant.buildType == 'debug' ? 0 : 1) ?: a.item.variant.name <=> b.item.variant.name
+                }
+                def selected = matches[0]
+                result = selected.files.size() != 1 ? [error: 'Multiple source files with the same name make preview ownership ambiguous'] :
+                    [module: selected.item.project.path, variant: selected.item.variant.name, classes: selected.classes.toList()]
+            }
+            new File(System.getenv('OPENIDEA_COMPOSE_MODEL')).setText(JsonOutput.toJson(result), 'UTF-8')
+        }
+    }
+}

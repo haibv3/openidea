@@ -51,7 +51,14 @@ export!(AndroidPreview);
 /// resizing the frame would leave children misplaced.
 fn layout_screens(request: &PreviewRequest) -> Result<Vec<Screen>, String> {
     let source = hosts::res_source(&request.project_path, &request.path);
-    let res = Resources::new(&*source);
+    layout_screens_with(request, &*source)
+}
+
+fn layout_screens_with(
+    request: &PreviewRequest,
+    source: &dyn resources::ResourceSource,
+) -> Result<Vec<Screen>, String> {
+    let res = Resources::new(source);
     let roots: Vec<Node> = layout::build(&request.content, &res)?;
     Ok(layout::DEVICES
         .iter()
@@ -76,7 +83,16 @@ fn layout_screens(request: &PreviewRequest) -> Result<Vec<Screen>, String> {
 
 /// Every `@Preview` function in one Kotlin file → one screen per frame.
 fn compose_screens(request: &PreviewRequest) -> Result<Vec<Screen>, String> {
-    let frames: Vec<Frame> = compose::scan(&request.content)?;
+    let source = hosts::res_source(&request.project_path, &request.path);
+    compose_screens_with(request, &*source)
+}
+
+fn compose_screens_with(
+    request: &PreviewRequest,
+    source: &dyn resources::ResourceSource,
+) -> Result<Vec<Screen>, String> {
+    let res = Resources::new(source);
+    let frames: Vec<Frame> = compose::scan_with(&request.content, Some(&res))?;
     if frames.is_empty() {
         return Err("no @Preview composable found in this file".to_owned());
     }
@@ -96,6 +112,51 @@ fn compose_screens(request: &PreviewRequest) -> Result<Vec<Screen>, String> {
 
 fn file_name(path: &str) -> String {
     path.rsplit(['/', '\\']).next().unwrap_or(path).to_owned()
+}
+
+#[cfg(test)]
+mod fixture_check {
+    use super::*;
+    use resources::MemorySource;
+    use std::path::{Path, PathBuf};
+
+    fn walk(dir: &Path, base: &Path, out: &mut MemorySource) -> MemorySource {
+        let mut s = std::mem::replace(out, MemorySource::new());
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                s = walk(&path, base, &mut s);
+            } else {
+                let rel = path.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
+                s = s.file(&rel, &std::fs::read_to_string(&path).unwrap());
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn fixtures_parse() {
+        let main = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/android-app/app/src/main"));
+        let mut src = MemorySource::new().module("app");
+        src = walk(&main.join("res"), &main.join("res"), &mut src);
+        src = src.project_file(
+            "app/src/main/AndroidManifest.xml",
+            &std::fs::read_to_string(main.join("AndroidManifest.xml")).unwrap(),
+        );
+        src = src.project_file(
+            "app/src/main/java/com/example/openidea/ui/BrandButton.kt",
+            &std::fs::read_to_string(main.join("java/com/example/openidea/ui/BrandButton.kt")).unwrap(),
+        );
+        let res = Resources::new(&src);
+        for f in std::fs::read_dir(main.join("res/layout")).unwrap() {
+            let p = f.unwrap().path();
+            let content = std::fs::read_to_string(&p).unwrap();
+            layout::build(&content, &res).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        }
+        let kt = std::fs::read_to_string(main.join("java/com/example/openidea/MainActivity.kt")).unwrap();
+        let frames = compose::scan_with(&kt, Some(&res)).unwrap();
+        assert_eq!(frames.len(), 4);
+    }
 }
 
 #[cfg(test)]
@@ -268,8 +329,8 @@ fun P() {
         assert!(out.html.contains(r#"color:#6750A4;white-space:pre-wrap;">Cancel"#), "{}", out.html);
         // …and the box carries `labelLarge`, so unstyled content inherits it.
         assert!(out.html.contains("font-size:14px;font-weight:500;"), "{}", out.html);
-        // Plain text keeps the theme foreground.
-        assert!(out.html.contains(r#"color:var(--ap-fg);white-space:pre-wrap;">Body"#), "{}", out.html);
+        // Plain text keeps the theme foreground and the `bodyLarge` 16 sp size.
+        assert!(out.html.contains(r#"color:var(--ap-fg);font-size:16px;white-space:pre-wrap;">Body"#), "{}", out.html);
     }
 
     #[test]
@@ -304,5 +365,127 @@ fun P() {
         assert!(!out.html.contains("<script>bad"));
         assert!(out.html.contains("&lt;script&gt;bad()&lt;/script&gt;"));
         assert!(out.html.contains("&quot;q&quot; &amp; more"));
+    }
+
+    fn render_with(
+        content: &str,
+        decl: &str,
+        source: &dyn resources::ResourceSource,
+    ) -> String {
+        let request = PreviewRequest {
+            path: "app/src/main/res/layout/screen.xml".to_owned(),
+            project_path: "/p".to_owned(),
+            decl: decl.to_owned(),
+            content: content.to_owned(),
+        };
+        let screens = if decl == "compose" {
+            compose_screens_with(&request, source)
+        } else {
+            layout_screens_with(&request, source)
+        };
+        render::page("screen", &screens.unwrap())
+    }
+
+    #[test]
+    fn manifest_theme_drawables_and_library_widgets_reach_the_page() {
+        let source = resources::MemorySource::new()
+            .module("app")
+            .project_file(
+                "app/src/main/AndroidManifest.xml",
+                r#"<manifest package="com.example.app">
+                    <application android:theme="@style/Theme.App"/>
+                </manifest>"#,
+            )
+            .file(
+                "values/themes.xml",
+                r#"<resources>
+                    <style name="Theme.App" parent="Theme.Material3.DayNight.NoActionBar">
+                        <item name="colorPrimary">#FF123456</item>
+                    </style>
+                </resources>"#,
+            )
+            .file("values/strings.xml", r#"<resources><string name="app_name">My App</string></resources>"#)
+            .file(
+                "menu/main.xml",
+                r#"<menu xmlns:android="http://schemas.android.com/apk/res/android">
+                    <item android:id="@+id/search" android:title="Search"/>
+                </menu>"#,
+            )
+            .file(
+                "drawable/bg_grad.xml",
+                r##"<shape><gradient android:startColor="#FFFF0000" android:endColor="#FF0000FF"
+                    android:angle="90"/></shape>"##,
+            )
+            .project_file(
+                "app/src/main/java/com/example/ui/BrandButton.kt",
+                "package com.example.ui\nimport androidx.appcompat.widget.AppCompatButton\nclass BrandButton(context: Context) : AppCompatButton(context)\n",
+            );
+        let html = render_with(
+            r##"<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+                xmlns:app="http://schemas.android.com/apk/res-auto"
+                android:orientation="vertical">
+                <androidx.appcompat.widget.Toolbar android:layout_width="match_parent"
+                    android:layout_height="wrap_content" app:title="@string/app_name" app:menu="@menu/main"/>
+                <com.google.android.material.textfield.TextInputLayout android:hint="Email">
+                    <EditText/>
+                </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.chip.ChipGroup>
+                    <com.google.android.material.chip.Chip android:text="Tag"/>
+                </com.google.android.material.chip.ChipGroup>
+                <com.example.ui.BrandButton android:text="Go"/>
+                <View android:layout_width="40dp" android:layout_height="20dp"
+                    android:background="@drawable/bg_grad"/>
+                <TextView android:text="Tinted" android:textColor="?attr/colorPrimary"/>
+            </LinearLayout>"##,
+            "layout-xml",
+            &source,
+        );
+        // Toolbar title + overflow menu from resources.
+        assert!(html.contains("ap-toolbar-title"), "{html}");
+        assert!(html.contains("My App"), "{html}");
+        assert!(html.contains("Search"), "{html}");
+        // Material text field chrome and chip labels.
+        assert!(html.contains("ap-til-label"), "{html}");
+        assert!(html.contains("Email"), "{html}");
+        assert!(html.contains("Tag"), "{html}");
+        // A custom view renders as the widget it extends.
+        assert!(html.contains("background:#6750A4;border-radius:20px"), "{html}");
+        // Gradient drawable becomes a CSS gradient.
+        assert!(html.contains("linear-gradient(0deg,#FF0000,#0000FF)"), "{html}");
+        // `?attr/colorPrimary` resolves against the manifest theme.
+        assert!(html.contains("color:#123456"), "{html}");
+    }
+
+    #[test]
+    fn compose_pages_resolve_project_resources() {
+        let source = resources::MemorySource::new()
+            .file("values/strings.xml", r#"<resources><string name="app_name">My App</string></resources>"#)
+            .file("values/colors.xml", r#"<resources><color name="brand">#00FF00</color></resources>"#)
+            .file(
+                "drawable/ic_star.xml",
+                r##"<vector xmlns:android="http://schemas.android.com/apk/res/android"
+                    android:width="24dp" android:height="24dp"
+                    android:viewportWidth="24" android:viewportHeight="24">
+                    <path android:pathData="M12,2L15,9L22,9L16,14L18,21L12,17L6,21L8,14L2,9L9,9Z"
+                        android:fillColor="#FFFFD700"/>
+                </vector>"##,
+            );
+        let html = render_with(
+            r#"@Preview
+@Composable
+fun P() {
+    Column {
+        Text(stringResource(R.string.app_name))
+        Text("Tinted", color = colorResource(R.color.brand))
+        Image(painter = painterResource(R.drawable.ic_star))
+    }
+}"#,
+            "compose",
+            &source,
+        );
+        assert!(html.contains("My App"), "{html}");
+        assert!(html.contains("color:#00FF00"), "{html}");
+        // A vector drawable is inlined so the preview needs no asset server.
+        assert!(html.contains("<svg") && html.contains("#FFD700"), "{html}");
     }
 }

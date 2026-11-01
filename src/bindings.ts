@@ -2554,6 +2554,8 @@ export type DeploymentSettings = {
 	exclude?: string[],
 };
 
+export type DeploymentType = "sftp" | "local";
+
 /**  One device or emulator as `adb devices -l` reports it. */
 export type Device = {
 	/**  `emulator-5554`, `R58M12345`, or `host:port`. */
@@ -2585,7 +2587,6 @@ export type DeviceEntry = {
 export type DeviceKind = "dir" | "file" | 
 /**  Symlink or special file: shown, never entered. */
 "link";
-export type DeploymentType = "sftp" | "local";
 
 export type Diagnostic = {
 	range: Range,

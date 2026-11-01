@@ -444,3 +444,362 @@ fn relative_baseline_and_editor_positions() {
     resolve_positions(&mut root, DEVICE_W, DEVICE_H);
     assert_eq!(root.children[0].style.pos, Some(Pos { left: Some(40.0), top: Some(25.0), right: None, bottom: None }));
 }
+
+fn leaked(src: MemorySource) -> Resources<'static> {
+    Resources::new(Box::leak(Box::new(src)))
+}
+
+fn one_with(res: &Resources, content: &str) -> Node {
+    let mut nodes = build(content, res).expect("build");
+    assert_eq!(nodes.len(), 1);
+    nodes.remove(0)
+}
+
+#[test]
+fn library_widget_kinds_map_to_renderable_widgets() {
+    let root = one(
+        r#"<LinearLayout xmlns:app="http://schemas.android.com/apk/res-auto"
+                android:orientation="vertical">
+            <androidx.appcompat.widget.LinearLayoutCompat android:orientation="horizontal"/>
+            <com.google.android.material.textfield.TextInputLayout
+                app:boxBackgroundMode="outline" android:hint="Name"/>
+            <com.google.android.material.bottomnavigation.BottomNavigationView/>
+            <androidx.swiperefreshlayout.widget.SwipeRefreshLayout/>
+            <androidx.coordinatorlayout.widget.CoordinatorLayout/>
+            <com.google.android.material.appbar.AppBarLayout/>
+            <com.google.android.material.chip.ChipGroup/>
+            <android.widget.RadioGroup/>
+            <android.widget.TableLayout/>
+        </LinearLayout>"#,
+    );
+    let kinds: Vec<&str> = root.children.iter().map(|c| c.kind.as_str()).collect();
+    assert_eq!(
+        kinds,
+        [
+            "LinearLayout",
+            "TextInputLayout",
+            "BottomNavigationView",
+            "FrameLayout",
+            "FrameLayout",
+            "LinearLayout",
+            "ChipGroup",
+            "LinearLayout",
+            "LinearLayout",
+        ]
+    );
+    assert!(root.children[1].style.outlined);
+    // RadioGroup/TableLayout/AppBarLayout default to a vertical stack.
+    assert_eq!(root.children[5].style.flex_dir, Some(FlexDir::Column));
+    assert_eq!(root.children[7].style.flex_dir, Some(FlexDir::Column));
+    assert_eq!(root.children[8].style.flex_dir, Some(FlexDir::Column));
+}
+
+#[test]
+fn material_style_names_refine_widget_variants() {
+    let root = one(
+        r#"<LinearLayout xmlns:app="http://schemas.android.com/apk/res-auto">
+            <com.google.android.material.button.MaterialButton
+                style="@style/Widget.Material3.Button.OutlinedButton" android:text="Out"/>
+            <com.google.android.material.button.MaterialButton
+                style="@style/Widget.Material3.Button.TextButton" android:text="Text"/>
+            <com.google.android.material.button.MaterialButton
+                style="@style/Widget.Material3.Button.TonalButton" android:text="Tonal"/>
+            <com.google.android.material.button.MaterialButton
+                style="@style/Widget.Material3.Button.ElevatedButton" android:text="High"/>
+            <com.google.android.material.card.MaterialCardView
+                style="@style/Widget.Material3.CardView.Elevated"/>
+            <com.google.android.material.card.MaterialCardView
+                style="@style/Widget.Material3.CardView.Outlined"/>
+            <com.google.android.material.textfield.TextInputLayout
+                style="@style/Widget.Material3.TextInputLayout.OutlinedBox"/>
+        </LinearLayout>"#,
+    );
+    let kinds: Vec<&str> = root.children.iter().map(|c| c.kind.as_str()).collect();
+    assert_eq!(kinds[..4], ["OutlinedButton", "TextButton", "FilledTonalButton", "ElevatedButton"]);
+    assert_eq!(root.children[4].style.elevation, Some(3.0));
+    assert!(root.children[5].style.outlined);
+    assert!(root.children[6].style.outlined);
+}
+
+#[test]
+fn material_app_attributes_are_applied() {
+    let src = leaked(
+        MemorySource::new()
+            .dir("drawable", &["ic_add.xml"])
+            .file(
+                "drawable/ic_add.xml",
+                r##"<vector android:viewportWidth="24" android:viewportHeight="24"><path android:pathData="M0,0h24v24h-24z" android:fillColor="#FF000000"/></vector>"##,
+            )
+            .file("menu/main.xml", r##"<menu><item android:title="Save"/><item android:title="Delete"/></menu>"##),
+    );
+    let root = one_with(
+        &src,
+        r##"<LinearLayout xmlns:app="http://schemas.android.com/apk/res-auto">
+            <Button app:backgroundTint="#FF00FF00"/>
+            <com.google.android.material.card.MaterialCardView
+                app:cardCornerRadius="8dp" app:cardBackgroundColor="#FFFFFFFF"
+                app:cardStrokeColor="#FFFF0000" app:cardStrokeWidth="2dp"/>
+            <ImageView app:srcCompat="@drawable/ic_add"/>
+            <com.google.android.material.textfield.TextInputLayout
+                app:boxBackgroundColor="#FFEEEEEE" app:boxStrokeColor="#FF0000"
+                app:boxStrokeWidth="2dp" app:startIconDrawable="@drawable/ic_add"
+                app:endIconDrawable="@drawable/ic_add"/>
+            <com.google.android.material.chip.Chip
+                app:chipBackgroundColor="#FF123456" app:chipStrokeColor="#FF654321"
+                app:chipStrokeWidth="1dp" app:chipCornerRadius="6dp"/>
+            <androidx.appcompat.widget.Toolbar
+                app:title="Inbox" app:subtitle="12 unread" app:menu="@menu/main"
+                app:navigationIcon="@drawable/ic_add"/>
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                app:srcCompat="@drawable/ic_add"/>
+        </LinearLayout>"##,
+    );
+    let c = &root.children;
+    assert_eq!(c[0].style.bg_color.as_deref(), Some("#00FF00"));
+    assert_eq!(c[1].style.radius, Some(8.0));
+    assert_eq!(c[1].style.border, Some((2.0, "#FF0000".to_owned())));
+    assert!(matches!(c[2].style.src_image, Some(Image::Svg(_))));
+    assert_eq!(c[3].style.bg_color.as_deref(), Some("#EEEEEE"));
+    assert_eq!(c[3].style.border, Some((2.0, "#FF0000".to_owned())));
+    assert!(matches!(c[3].style.drawable_start, Some(Image::Svg(_))));
+    assert!(matches!(c[3].style.drawable_end, Some(Image::Svg(_))));
+    assert_eq!(c[4].style.bg_color.as_deref(), Some("#123456"));
+    assert_eq!(c[4].style.border, Some((1.0, "#654321".to_owned())));
+    assert_eq!(c[4].style.radius, Some(6.0));
+    assert_eq!(c[5].text.as_deref(), Some("Inbox"));
+    assert_eq!(c[5].hint.as_deref(), Some("12 unread"));
+    assert_eq!(c[5].items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), ["Save", "Delete"]);
+    assert!(matches!(c[5].style.drawable_start, Some(Image::Svg(_))));
+    assert!(matches!(c[6].style.src_image, Some(Image::Svg(_))));
+}
+
+#[test]
+fn android_attributes_cover_spacing_text_state_and_drawables() {
+    let src = leaked(
+        MemorySource::new()
+            .dir("drawable", &["ic_add.xml"])
+            .file(
+                "drawable/ic_add.xml",
+                r##"<vector android:viewportWidth="24" android:viewportHeight="24"><path android:pathData="M0,0h24v24h-24z" android:fillColor="#FF000000"/></vector>"##,
+            ),
+    );
+    let root = one_with(
+        &src,
+        r##"<LinearLayout>
+            <TextView android:layout_marginHorizontal="8dp" android:paddingVertical="4dp"
+                android:textAppearance="@style/TextAppearance.Material3.TitleLarge"
+                android:minWidth="100dp" android:maxHeight="40dp" android:enabled="false"
+                android:translationX="4dp" android:scaleY="0.5" android:singleLine="true"
+                android:backgroundTint="#FF00FF00" android:drawableStart="@drawable/ic_add"
+                android:drawableEnd="@drawable/ic_add" android:textFontWeight="700"/>
+            <ProgressBar android:indeterminate="false" android:progress="25"
+                android:progressTint="#FF123456" android:progressBackgroundTint="#FFE0E0E0"/>
+            <RatingBar android:numStars="4" android:rating="3"/>
+        </LinearLayout>"##,
+    );
+    let t = &root.children[0];
+    assert_eq!(t.style.margin, Edges { start: 8.0, end: 8.0, top: 0.0, bottom: 0.0 });
+    assert_eq!(t.style.padding, Edges { start: 0.0, end: 0.0, top: 4.0, bottom: 4.0 });
+    // A library text appearance is recognised by name.
+    assert_eq!(t.style.font_size, Some(22.0));
+    assert_eq!(t.style.min_width, Some(100.0));
+    assert_eq!(t.style.max_height, Some(40.0));
+    assert_eq!(t.style.enabled, Some(false));
+    assert_eq!(t.style.alpha, Some(0.38));
+    assert_eq!(t.style.translation, Some((4.0, 0.0)));
+    assert_eq!(t.style.scale, Some((1.0, 0.5)));
+    assert!(t.style.single_line);
+    assert_eq!(t.style.max_lines, Some(1));
+    assert_eq!(t.style.bg_color.as_deref(), Some("#00FF00"));
+    assert!(matches!(t.style.drawable_start, Some(Image::Svg(_))));
+    assert_eq!(t.style.font_weight, Some(700));
+    let bar = &root.children[1];
+    assert_eq!(bar.style.progress_tint.as_deref(), Some("#123456"));
+    assert_eq!(bar.style.track_tint.as_deref(), Some("#E0E0E0"));
+    assert_eq!(root.children[2].style.rating, Some((3.0, 4.0)));
+}
+
+#[test]
+fn theme_comes_from_the_manifest_and_tools_context() {
+    let res = leaked(
+        MemorySource::new()
+            .module("app")
+            .project_file(
+                "app/src/main/AndroidManifest.xml",
+                r#"<manifest package="com.example.app">
+                    <application android:theme="@style/Theme.App">
+                        <activity android:name=".MainActivity" android:theme="@style/Theme.Main"/>
+                    </application>
+                </manifest>"#,
+            )
+            .file(
+                "values/themes.xml",
+                r#"<resources>
+                    <style name="Theme.App" parent="Theme.Material3.DayNight.NoActionBar">
+                        <item name="colorPrimary">#FF123456</item>
+                    </style>
+                    <style name="Theme.Main" parent="Theme.App">
+                        <item name="colorPrimary">#FF654321</item>
+                    </style>
+                </resources>"#,
+            ),
+    );
+    let app = one_with(&res, r#"<LinearLayout><TextView android:textColor="?attr/colorPrimary"/></LinearLayout>"#);
+    assert_eq!(app.children[0].style.fg.as_deref(), Some("#123456"));
+    // `tools:context` selects the activity's theme, exactly like the editor.
+    let activity = one_with(
+        &res,
+        r#"<LinearLayout xmlns:tools="http://schemas.android.com/tools" tools:context=".MainActivity">
+            <TextView android:textColor="?attr/colorPrimary"/>
+        </LinearLayout>"#,
+    );
+    assert_eq!(activity.children[0].style.fg.as_deref(), Some("#654321"));
+}
+
+#[test]
+fn custom_views_inherit_their_superclass_widget() {
+    let res = leaked(
+        MemorySource::new()
+            .module("app")
+            .project_file(
+                "app/src/main/java/com/example/ui/BrandButton.kt",
+                "package com.example.ui\nimport androidx.appcompat.widget.AppCompatButton\nclass BrandButton(context: Context) : AppCompatButton(context) { }\n",
+            )
+            .project_file(
+                "app/src/main/java/com/example/ui/Panel.kt",
+                "package com.example.ui\nclass Panel : androidx.constraintlayout.widget.ConstraintLayout { }\n",
+            )
+            .project_file(
+                "app/src/main/java/com/example/ui/Unknown.kt",
+                "package com.example.ui\nimport android.view.View\nclass Unknown(context: Context) : View(context) { }\n",
+            ),
+    );
+    let root = one_with(
+        &res,
+        r#"<LinearLayout>
+            <com.example.ui.BrandButton android:text="Go"/>
+            <view class="com.example.ui.Panel"><TextView android:text="in panel"/></view>
+            <com.example.ui.Unknown android:layout_width="10dp" android:layout_height="10dp"/>
+        </LinearLayout>"#,
+    );
+    assert_eq!(root.children[0].kind, "Button");
+    assert_eq!(root.children[0].text.as_deref(), Some("Go"));
+    assert_eq!(root.children[1].kind, "ConstraintLayout");
+    assert_eq!(root.children[1].children[0].text.as_deref(), Some("in panel"));
+    // Extends only View: stays a labelled box, like an uninflatable custom view.
+    assert_eq!(root.children[2].kind, "View");
+    assert_eq!(root.children[2].sub.as_deref(), Some("Unknown"));
+}
+
+#[test]
+fn constraint_ratio_prefix_circle_barrier_and_gone_margins() {
+    // Both axes match-constraint: the height follows the 16:9 ratio.
+    let mut root = one(
+        r#"<ConstraintLayout android:layout_width="320dp" android:layout_height="300dp">
+            <View android:layout_width="0dp" android:layout_height="0dp"
+                app:layout_dimensionRatio="H,16:9"
+                app:layout_constraintStart_toStartOf="parent" app:layout_constraintEnd_toEndOf="parent"
+                app:layout_constraintTop_toTopOf="parent" app:layout_constraintBottom_toBottomOf="parent"/>
+        </ConstraintLayout>"#,
+    );
+    resolve_positions(&mut root, DEVICE_W, DEVICE_H);
+    let h = root.children[0].style.height.expect("ratio height");
+    assert!(matches!(h, Size::Px(v) if (v - 180.0).abs() < 0.01), "{h:?}");
+
+    // `W,` derives the width from the constrained height.
+    let mut root = one(
+        r#"<ConstraintLayout android:layout_width="320dp" android:layout_height="300dp">
+            <View android:layout_width="0dp" android:layout_height="0dp"
+                app:layout_dimensionRatio="W,16:9"
+                app:layout_constraintTop_toTopOf="parent" app:layout_constraintBottom_toBottomOf="parent"
+                app:layout_constraintStart_toStartOf="parent"/>
+        </ConstraintLayout>"#,
+    );
+    resolve_positions(&mut root, DEVICE_W, DEVICE_H);
+    let w = root.children[0].style.width.expect("ratio width");
+    assert!(matches!(w, Size::Px(v) if (v - 300.0 * 16.0 / 9.0).abs() < 0.05), "{w:?}");
+
+    // Circular constraint: 20 dp right of a 40×40 anchor, centred.
+    let mut root = one(
+        r#"<ConstraintLayout android:layout_width="300dp" android:layout_height="200dp">
+            <View android:id="@+id/anchor" android:layout_width="40dp" android:layout_height="40dp"
+                app:layout_constraintStart_toStartOf="parent" app:layout_constraintTop_toTopOf="parent"/>
+            <View android:layout_width="20dp" android:layout_height="20dp"
+                app:layout_constraintCircle="@id/anchor" app:layout_constraintCircleRadius="20dp"
+                app:layout_constraintCircleAngle="90"/>
+        </ConstraintLayout>"#,
+    );
+    resolve_positions(&mut root, DEVICE_W, DEVICE_H);
+    assert_eq!(root.children[1].style.pos.unwrap().left, Some(30.0));
+    assert_eq!(root.children[1].style.pos.unwrap().top, Some(10.0));
+
+    // Barrier: a child starts at the widest referenced view's end.
+    let mut root = one(
+        r#"<ConstraintLayout android:layout_width="300dp" android:layout_height="200dp">
+            <View android:id="@+id/a" android:layout_width="40dp" android:layout_height="20dp"
+                app:layout_constraintStart_toStartOf="parent" app:layout_constraintTop_toTopOf="parent"/>
+            <View android:id="@+id/b" android:layout_width="60dp" android:layout_height="20dp"
+                app:layout_constraintStart_toStartOf="parent" app:layout_constraintTop_toBottomOf="@id/a"/>
+            <androidx.constraintlayout.widget.Barrier android:id="@+id/barrier"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                app:barrierDirection="end" app:constraint_referenced_ids="a,b"/>
+            <View android:layout_width="20dp" android:layout_height="20dp"
+                app:layout_constraintStart_toEndOf="@id/barrier" app:layout_constraintTop_toTopOf="parent"/>
+        </ConstraintLayout>"#,
+    );
+    resolve_positions(&mut root, DEVICE_W, DEVICE_H);
+    assert_eq!(root.children[3].style.pos.unwrap().left, Some(60.0));
+
+    // Gone anchors use `layout_goneMarginStart` instead of the normal margin.
+    let mut root = one(
+        r#"<ConstraintLayout android:layout_width="300dp" android:layout_height="200dp">
+            <View android:id="@+id/hidden" android:layout_width="100dp" android:layout_height="20dp"
+                android:visibility="gone"
+                app:layout_constraintStart_toStartOf="parent" app:layout_constraintTop_toTopOf="parent"/>
+            <View android:layout_width="40dp" android:layout_height="20dp"
+                android:layout_marginStart="8dp" app:layout_goneMarginStart="20dp"
+                app:layout_constraintStart_toStartOf="@id/hidden" app:layout_constraintTop_toTopOf="parent"/>
+        </ConstraintLayout>"#,
+    );
+    resolve_positions(&mut root, DEVICE_W, DEVICE_H);
+    assert_eq!(root.children[1].style.pos.unwrap().left, Some(20.0));
+}
+
+#[test]
+fn fragment_and_view_stub_inflate_tools_layout() {
+    let root = one(
+        r#"<FrameLayout>
+            <fragment android:name="com.example.MyFragment" tools:layout="@layout/simple"/>
+        </FrameLayout>"#,
+    );
+    assert_eq!(root.children[0].kind, "LinearLayout");
+    assert_eq!(root.children[0].children[0].text.as_deref(), Some("included"));
+
+    let root = one(r#"<FrameLayout><ViewStub tools:layout="@layout/simple"/></FrameLayout>"#);
+    assert_eq!(root.children[0].kind, "LinearLayout");
+
+    // Without tools:layout a ViewStub is invisible, as at runtime.
+    let root = one(r#"<FrameLayout><ViewStub/></FrameLayout>"#);
+    assert_eq!(root.children[0].style.visibility, Visibility::Gone);
+}
+
+#[test]
+fn recycler_view_layout_manager_maps_to_grid_and_row() {
+    let root = one(
+        r#"<RecyclerView xmlns:app="http://schemas.android.com/apk/res-auto"
+            xmlns:tools="http://schemas.android.com/tools"
+            app:layoutManager="androidx.recyclerview.widget.GridLayoutManager" app:spanCount="2"
+            tools:listitem="@layout/simple" tools:itemCount="4"/>"#,
+    );
+    assert_eq!(root.kind, "GridView");
+    assert_eq!(root.style.grid_cols, Some(2));
+    assert_eq!(root.children.len(), 4);
+
+    let root = one(
+        r#"<RecyclerView xmlns:app="http://schemas.android.com/apk/res-auto"
+            android:orientation="horizontal"
+            app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"/>"#,
+    );
+    assert_eq!(root.kind, "LazyRow");
+    assert!(root.style.scroll_x);
+}

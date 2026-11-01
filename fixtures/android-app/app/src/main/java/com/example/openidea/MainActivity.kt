@@ -1,6 +1,7 @@
 package com.example.openidea
 
 import android.content.res.Configuration.UI_MODE_NIGHT_YES
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -22,6 +23,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.colorResource
+import androidx.compose.ui.res.dimensionResource
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 
@@ -67,5 +72,24 @@ private fun PalettePreview() {
         Box(modifier = Modifier.size(48.dp).background(Color(0xFF6750A4)))
         Spacer(Modifier.height(4.dp))
         Text("Palette", color = MaterialTheme.colorScheme.primary)
+    }
+}
+
+@Preview(name = "Project resources", showBackground = true, widthDp = 280)
+@Composable
+private fun ResourcePreview() {
+    Column(
+        modifier = Modifier
+            .background(colorResource(R.color.surface))
+            .padding(dimensionResource(R.dimen.screen_padding)),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            stringResource(R.string.note_sample_title),
+            style = MaterialTheme.typography.titleMedium,
+            color = colorResource(R.color.primary),
+        )
+        Image(painter = painterResource(R.drawable.ic_add), contentDescription = null)
+        Text(stringResource(R.string.welcome_message))
     }
 }

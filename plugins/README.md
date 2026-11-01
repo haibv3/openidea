@@ -278,7 +278,8 @@ installing it.
 Android Studio's layout preview or IntelliJ's Markdown preview. Matching files
 get an _Editor / Editor and Preview / Preview_ switch around the text editor;
 while it is visible, the IDE renders the editor's current text through the
-plugin — unsaved edits included, debounced while typing.
+plugin — unsaved edits included, debounced while typing, except where a host
+renderer requires saved files as described below.
 
 ```toml
 [[contributes.previews]]
@@ -330,10 +331,18 @@ impl Guest for MyPlugin {
   preview. Use `host::log` for diagnostics; a trap disables the plugin like
   for any other call, so validate input and return errors instead.
 
-[`plugins/android-preview`](../plugins/android-preview) is a complete example:
-it previews Android XML layouts (device frame, common views and attributes,
-`tools:` overrides, resource resolution) and Jetpack Compose `@Preview`
-functions. Try it on [`fixtures/android-app`](../fixtures/android-app).
+[`plugins/android-preview`](../plugins/android-preview) provides Android previews.
+XML layouts use the experimental host Layoutlib bridge
+([`layoutlib.rs`](../crates/ide-android/src/layoutlib.rs)); this requires Android
+Studio and its matching SDK platform, a Gradle project and explicit workspace
+trust because project code runs outside the WASM sandbox. The selected module
+and variant are shown in the preview. Compose previews use the Android CLI 1.1
+`android` command and require a supported Gradle project and explicit workspace
+trust; the CLI and project code run outside the WASM sandbox. Save the Kotlin
+file before rendering: unsaved changes produce a save-required error rather
+than a stale image. The host does not fall back to the plugin's approximate
+Compose parser. The [`fixtures/android-app`](../fixtures/android-app) fixture
+is not a Gradle project.
 
 ## 7. Installing and developing
 

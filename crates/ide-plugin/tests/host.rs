@@ -650,4 +650,49 @@ fn android_preview_plugin_renders_layouts() {
     assert!(out.html.contains("From values"), "string resource unresolved: {}", out.html);
     // Guideline at 72 dp + the parent's 16 dp padding.
     assert!(out.html.contains("left:88px"), "app: constraint ignored: {}", out.html);
+
+    // Project files outside `res/` are reachable too: the manifest theme backs
+    // `?attr/…` attributes and a custom view's superclass comes from its source.
+    std::fs::write(
+        f.project.join("app/src/main/AndroidManifest.xml"),
+        r#"<manifest package="com.example.app">
+            <application android:theme="@style/Theme.App"/>
+        </manifest>"#,
+    )
+    .unwrap();
+    std::fs::write(
+        res.join("values/themes.xml"),
+        r#"<resources>
+            <style name="Theme.App" parent="Theme.Material3.DayNight">
+                <item name="colorPrimary">#FF123456</item>
+            </style>
+        </resources>"#,
+    )
+    .unwrap();
+    let sources = f.project.join("app/src/main/java/com/example/ui");
+    std::fs::create_dir_all(&sources).unwrap();
+    std::fs::write(
+        sources.join("BrandButton.kt"),
+        "package com.example.ui\nimport androidx.appcompat.widget.AppCompatButton\n\
+         class BrandButton(context: Context) : AppCompatButton(context)\n",
+    )
+    .unwrap();
+    let request = PreviewRequest {
+        path: res.join("layout/brand.xml").to_string_lossy().into_owned(),
+        project_path: "app/src/main/res/layout/brand.xml".into(),
+        decl: "layout-xml".into(),
+        content: r#"<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:orientation="vertical">
+    <com.example.ui.BrandButton android:layout_width="wrap_content"
+        android:layout_height="wrap_content" android:text="Brand"
+        android:textColor="?attr/colorPrimary"/>
+</LinearLayout>"#
+            .into(),
+    };
+    let out = f.host.render_preview("android-preview", request, f.inv()).unwrap();
+    // The custom view renders as the Material button it extends…
+    assert!(out.html.contains("background:#6750A4;border-radius:20px"), "{}", out.html);
+    // …and `?attr/colorPrimary` resolves from the manifest theme.
+    assert!(out.html.contains("color:#123456"), "manifest theme ignored: {}", out.html);
 }

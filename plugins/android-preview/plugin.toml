@@ -1,9 +1,33 @@
 id = "android-preview"
 name = "Android Preview"
-version = "0.2.0"
-description = "Live previews for Android XML layouts and Jetpack Compose @Preview functions, rendered like Android Studio's preview pane."
+version = "0.3.0"
+description = "Android XML previews with experimental Layoutlib and Compose previews using Android CLI 1.1; save Kotlin files before rendering."
 authors = ["OpenIDEA contributors"]
 change-notes = """
+Compose previews require Android CLI 1.1, a Gradle project and workspace trust;
+save the Kotlin file before rendering. Project code runs outside the WASM sandbox.
+
+0.3.0 — library-aware rendering:
+- The app/activity theme is read from the manifest (and `tools:context`), so
+  `?attr/colorPrimary`-style references resolve for both layouts and styles.
+- Custom view classes resolve their superclass from the project's Kotlin/Java
+  sources (and the widget-name suffix rule), so `com.example.BrandButton`
+  previews as a Material button instead of an empty box.
+- Material/AppCompat attributes, styles and widgets: Toolbar (+`app:menu`
+  and title/subtitle), TextInputLayout/TextInputEditText, Chip/ChipGroup,
+  MaterialButton variants, CardView, RecyclerView (`tools:listitem`,
+  layoutManager/spanCount), menus, color state lists, adaptive icons,
+  selector/ripple/layer-list/inset/gradient/vector drawables, compound
+  drawables, tints, text appearances (M3 and M2 names), min/max sizes,
+  enabled/alpha/transforms and RatingBar.
+- ConstraintLayout: barriers, circles, `H,`/`W,` ratio prefixes, gone
+  margins, percent and min/max clamps; ratio-derived sizes use the spanned
+  anchors when both axes are matched.
+- Compose: `stringResource`/`painterResource`/`colorResource`/
+  `dimensionResource` and bare `R.…` references resolve through the project's
+  resources; Scaffold/TopAppBar/NavigationBar/TabRow/FAB/chips/text fields,
+  Surface/Card borders, padding overloads, `sizeIn`, Lazy list `items`,
+  default parameter values, side-effect wrappers and `@Preview(device=…)`.
 0.2.0 — accuracy pass against Android Studio:
 - ConstraintLayout rules are read from the `app:` namespace (guidelines,
   dimension ratios, editor-absolute positions), and wrap_content

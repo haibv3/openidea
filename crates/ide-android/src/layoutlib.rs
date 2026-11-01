@@ -4,16 +4,15 @@
 //! layout with the real framework code shipped in Android Studio's
 //! `layoutlib.jar` and rasterises it with `layoutlib_jni`. This module locates
 //! that installation, assembles the classpath the bridge needs, and runs
-//! [`RenderBridge`](../../../plugins/android-preview) (Java) as a one-shot
-//! process that writes a PNG.
-//!
-//! Experimental and not yet connected to the preview provider. The bridge
-//! does not yet reproduce Studio's resource selection or project classloading,
-//! so its output must not be treated as an Android Studio-equivalent preview.
+//! [`RenderBridge`](../bridge/RenderBridge.java) (Java) as a one-shot process
+//! that writes a PNG. XML preview uses this experimental bridge; it does not
+//! yet reproduce Studio's resource selection or project classloading, so its
+//! output must not be treated as Android Studio-equivalent.
 
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 /// Android Studio's layoutlib installation: the renderer plus its data.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,6 +141,31 @@ impl Layoutlib {
     pub fn build_prop(&self) -> PathBuf {
         self.data.join("build.prop")
     }
+
+    /// SDK platform resources matching the framework bundled with this Layoutlib.
+    /// A project compile SDK may differ from Studio's embedded framework.
+    pub fn framework_platform(&self, sdk_root: &Path) -> Result<PathBuf, String> {
+        let path = self.build_prop();
+        let props = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let value = |name: &str| {
+            props.lines().find_map(|line| {
+                let (key, value) = line.split_once('=')?;
+                (key.trim() == name).then(|| value.trim()).filter(|v| !v.is_empty())
+            })
+        };
+        let major = value("ro.build.version.sdk").ok_or("Layoutlib build.prop has no SDK version")?;
+        let full = value("ro.build.version.sdk_full").unwrap_or(major);
+        for version in [full, major] {
+            if !version.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                return Err(format!("invalid Layoutlib SDK version: {version}"));
+            }
+            let platform = sdk_root.join("platforms").join(format!("android-{version}"));
+            if platform.join("data/res/values/attrs.xml").is_file() {
+                return Ok(platform);
+            }
+        }
+        Err(format!("Layoutlib requires SDK platform android-{full} (or android-{major}) under {}", sdk_root.display()))
+    }
 }
 
 /// One render request, resolved to absolute paths.
@@ -212,7 +236,10 @@ pub fn render(lib: &Layoutlib, request: &RenderRequest, bridge_jar: &Path) -> Re
     put("studio", &lib.studio_root().to_string_lossy());
     put("nativeDir", &native_dir.to_string_lossy());
     put("icuData", &icu_data.to_string_lossy());
-    put("platform", &request.platform.to_string_lossy());
+    let sdk_root = request.platform.parent().and_then(Path::parent)
+        .ok_or_else(|| format!("invalid Android platform path: {}", request.platform.display()))?;
+    let framework_platform = lib.framework_platform(sdk_root)?;
+    put("platform", &framework_platform.to_string_lossy());
     put("layout", &layout.to_string_lossy());
     put("namespace", &request.namespace);
     put("res", &request.res_dir.to_string_lossy());
@@ -241,10 +268,10 @@ pub fn render(lib: &Layoutlib, request: &RenderRequest, bridge_jar: &Path) -> Re
     if let Ok(joined) = std::env::join_paths(paths) {
         cmd.env("PATH", joined);
     }
-    let output = cmd.output().map_err(|e| format!("{}: {e}", lib.java.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("layoutlib failed: {}", stderr.trim()));
+    let output = crate::process::run(cmd, Duration::from_secs(60), None)
+        .map_err(|e| format!("layoutlib process failed: {}", e.message))?;
+    if !output.success {
+        return Err(format!("layoutlib failed: {}", output.stderr.trim()));
     }
     std::fs::read(&out).map_err(|e| format!("{}: {e}", out.display()))
 }
@@ -275,18 +302,12 @@ pub fn compile_bridge(lib: &Layoutlib, source: &Path, cache_root: &Path) -> Resu
     let javac = lib.java.with_file_name(if cfg!(windows) { "javac.exe" } else { "javac" });
     let javac = if javac.is_file() { javac } else { PathBuf::from("javac") };
     let classpath = join_paths(&lib.classpath())?;
-    let output = Command::new(&javac)
-        .arg("-nowarn")
-        .arg("-cp")
-        .arg(&classpath)
-        .arg("-d")
-        .arg(temp.path())
-        .arg(source)
-        .output()
-        .map_err(|e| format!("{}: {e}", javac.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("javac failed: {}", stderr.trim()));
+    let mut command = Command::new(&javac);
+    command.arg("-nowarn").arg("-cp").arg(&classpath).arg("-d").arg(temp.path()).arg(source);
+    let output = crate::process::run(command, Duration::from_secs(120), None)
+        .map_err(|e| format!("javac failed: {}", e.message))?;
+    if !output.success {
+        return Err(format!("javac failed: {}", output.stderr.trim()));
     }
     if let Err(e) = std::fs::rename(temp.path(), &out) {
         if !marker.is_file() {
@@ -334,6 +355,25 @@ mod tests {
         let lib = Layoutlib::at(studio).expect("recognised");
         assert!(lib.classpath()[0].ends_with("layoutlib.jar"));
         assert!(lib.classpath().iter().any(|p| p.ends_with("layoutlib-api.jar")));
+    }
+
+    #[test]
+    fn selects_resources_matching_layoutlib_framework_not_project_compile_sdk() {
+        let dir = tempfile::tempdir().unwrap();
+        let sdk = dir.path().join("sdk");
+        let platform = sdk.join("platforms/android-37.0/data/res/values");
+        std::fs::create_dir_all(&platform).unwrap();
+        std::fs::write(platform.join("attrs.xml"), "<resources/>").unwrap();
+        std::fs::write(dir.path().join("build.prop"), "ro.build.version.sdk=37\nro.build.version.sdk_full=37.0\n").unwrap();
+        let lib = Layoutlib {
+            jar: dir.path().join("layoutlib.jar"),
+            data: dir.path().to_path_buf(),
+            lib: dir.path().to_path_buf(),
+            java: dir.path().join("java"),
+        };
+        assert_eq!(lib.framework_platform(&sdk).unwrap(), sdk.join("platforms/android-37.0"));
+        std::fs::remove_file(platform.join("attrs.xml")).unwrap();
+        assert!(lib.framework_platform(&sdk).unwrap_err().contains("android-37.0"));
     }
 
     #[test]

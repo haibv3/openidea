@@ -31,11 +31,15 @@ mod wasm {
     /// roots like Gradle does: the module's own `res/` first, then the merged
     /// library resources Gradle leaves in `build/intermediates` (that's where
     /// library styles, theme attributes and `drawable-*dpi` live — Android
-    /// Studio previews against the same merged set). Missing files and
-    /// directories simply resolve to "unresolved reference" in the renderer.
+    /// Studio previews against the same merged set). Project-relative reads
+    /// (`read_project`) also reach the `AndroidManifest.xml` and the Kotlin/Java
+    /// sources, for the app theme and custom view superclasses. Missing files
+    /// and directories simply resolve to "unresolved reference" in the renderer.
     pub struct HostSource {
         /// Project-relative resource roots, most authoritative first.
         pub roots: Vec<String>,
+        /// Gradle module the previewed file belongs to (`""` = project root).
+        pub module: String,
     }
 
     /// Project-relative `res/` directory of a module (`app/src/main/res`).
@@ -43,25 +47,53 @@ mod wasm {
         format!("{module}/src/main/res")
     }
 
-    /// Merged-resource fallbacks for a module `res/` path, if the project has
-    /// a Gradle build directory (`<module>/build/intermediates/…`).
+    /// The module a `res/` root belongs to (`app/src/main/res` → `app`).
+    fn module_of(res_root: &str) -> String {
+        res_root.strip_suffix("/src/main/res").unwrap_or("").to_owned()
+    }
+
+    /// Capitalised variant name (`debug` → `Debug`, `freeDebug` → `FreeDebug`),
+    /// which is how AGP names its merged-resource directories.
+    fn capitalize(variant: &str) -> String {
+        let mut c = variant.chars();
+        match c.next() {
+            Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+            None => String::new(),
+        }
+    }
+
+    /// Merged-resource fallbacks for a module `res/` path, if the project has a
+    /// Gradle build directory (`<module>/build/intermediates/…`). Variants are
+    /// discovered rather than assumed, so flavours (`freeDebug`) work too.
     fn merged_roots(module_res: &str) -> Vec<String> {
         let Some(module) = module_res.strip_suffix("/src/main/res") else { return Vec::new() };
+        let intermediates = format!("{module}/build/intermediates");
         let mut roots = Vec::new();
-        for variant in ["debug", "release"] {
-            let cap = format!("{}{}", variant[..1].to_uppercase(), &variant[1..]);
-            for cand in [
-                format!("{module}/build/intermediates/packaged_res/{variant}/package{cap}Resources"),
-                format!("{module}/build/intermediates/incremental/{variant}/merge{cap}Resources/merged.dir"),
-            ] {
-                if crate::openidea::plugin::host::list_dir(&cand).is_ok() {
-                    roots.push(cand);
+        for kind in ["packaged_res", "merged_res"] {
+            let base = format!("{intermediates}/{kind}");
+            let variants = crate::openidea::plugin::host::list_dir(&base)
+                .map(|entries| entries.into_iter().filter(|e| e.is_dir).map(|e| e.name).collect::<Vec<_>>())
+                .unwrap_or_default();
+            let variants = if variants.is_empty() { vec!["debug".to_owned(), "release".to_owned()] } else { variants };
+            for variant in variants {
+                let cap = capitalize(&variant);
+                for cand in [
+                    format!("{base}/{variant}/package{cap}Resources"),
+                    format!("{base}/{variant}/merge{cap}Resources"),
+                    format!("{base}/{variant}"),
+                    format!("{intermediates}/incremental/{variant}/merge{cap}Resources/merged.dir"),
+                ] {
+                    if crate::openidea::plugin::host::list_dir(&cand).is_ok() {
+                        roots.push(cand);
+                    }
                 }
             }
             if !roots.is_empty() {
                 break;
             }
         }
+        roots.sort();
+        roots.dedup();
         roots
     }
 
@@ -93,9 +125,10 @@ mod wasm {
                     .find(|c| crate::openidea::plugin::host::list_dir(c).is_ok())
                     .unwrap_or_else(|| "res".to_owned())
             });
+            let module = module_of(&primary);
             let mut roots = vec![primary.clone()];
             roots.extend(merged_roots(&primary));
-            Self { roots }
+            Self { roots, module }
         }
     }
 
@@ -110,15 +143,25 @@ mod wasm {
                 .find_map(|root| crate::openidea::plugin::host::read_file_bytes(&format!("{root}/{path}")).ok())
         }
 
+        fn read_project(&self, path: &str) -> Option<String> {
+            crate::openidea::plugin::host::read_file(path).ok()
+        }
+
+        fn list_project(&self, dir: &str) -> Vec<String> {
+            self.list_root(dir)
+        }
+
+        fn module(&self) -> &str {
+            &self.module
+        }
+
         fn list(&self, dir: &str) -> Vec<String> {
             let mut out: Vec<String> = Vec::new();
             for root in &self.roots {
                 let path = if dir.is_empty() { root.clone() } else { format!("{root}/{dir}") };
-                if let Ok(entries) = crate::openidea::plugin::host::list_dir(&path) {
-                    for e in entries {
-                        if !out.iter().any(|n| *n == e.name) {
-                            out.push(e.name);
-                        }
+                for name in self.list_root(&path) {
+                    if !out.iter().any(|n| *n == name) {
+                        out.push(name);
                     }
                 }
             }

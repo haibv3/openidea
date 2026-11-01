@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:color="#FF9E9E9E" android:state_enabled="false" />
+    <item android:color="@color/on_surface_variant" android:state_pressed="true" />
+    <item android:color="@color/on_surface" />
+</selector>
